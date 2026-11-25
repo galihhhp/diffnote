@@ -47,9 +47,9 @@ Run `?` inside diffnote for the full list. Defaults:
 
 | Group | Keys |
 | --- | --- |
-| Navigate | `Tab` view, `f`/`F` file, `]`/`[` hunk, `o` jump to file, `/` search, `n`/`N` match |
+| Navigate | `Tab` view, `f`/`F` file, `]`/`[` hunk, `o` jump to file, `/` search, `n`/`N` match, `h`/`l`/`0` pan split view |
 | Review | `c` comment, `m` edit note, `1` focus notes, `R` resend, `s` send, `S` target |
-| Git | `a` stage, `C-a` stage all, `u` unstage, `C-u` unstage all, `A` stage hunk, `gc` commit, `r` refresh |
+| Git | `a` stage, `C-a` stage all, `u` unstage, `C-u` unstage all, `A` stage hunk, `gc` commit, `r` refresh, `U` update branch, `B` new branch, `p` choose base branch, `C` rename branch, `D` pull, `P` push, `W` force-with-lease push |
 | View | `v` split, `b` comments, `L` commit log, `J`/`K` scroll log diff |
 | Tools | `t` new agent tab, `e` editor tab, `E` editor float, `?` help |
 
@@ -69,6 +69,9 @@ agents = ["pi", "claude", "codex", "opencode", "aider", "goose", "cline"]
 new_tab_agent = "pi"
 clipboard_command = "pbcopy"
 editor_command = "nvim"
+base_branch = "main"
+update_command = "{update_script} {base}"
+branchup_command = "{branchup_script} {branch} --base {base}"
 
 [templates]
 pi = 'pi -- @{file} "Please address these review comments"'
@@ -90,6 +93,15 @@ cline = 'cline "Please address the review comments in {file}"'
 | `clipboard_command` | Any program reading stdin; auto-detected across macOS/Wayland/X11 |
 | `editor_command` | Overridden by `$DIFFNOTE_NVIM`, then `$VISUAL`, then `$EDITOR` |
 | `split`, `show_comments` | Default pane visibility; toggled with `v` and `b` |
+| `base_branch` | Branch to compare against; header shows ahead/behind and "up to date"; `p` changes it for the session from a list of local branches |
+| `rename_branch`, `push` | Key bindings for `C` (rename current branch) and `P` (`git push -u origin HEAD`), both confirmed before running |
+| `update_command`, `branchup_command` | Shell commands run with `U` / `B`; `{base}` and `{branch}` expand before running |
+
+`p` opens a list of local branches to pick the base for this session; the header and `U`/`B` update immediately. `C` prompts for a new name and renames the current local branch. `D` runs `git pull`, `P` runs `git push -u origin HEAD`, and `W` runs `git push -u origin HEAD --force-with-lease`. All four ask for confirmation first and show the command output afterward. `W` uses a red warning because it can rewrite remote history.
+
+`U` runs `update_command` and `B` prompts for a branch name then runs `branchup_command`. Both run through `$SHELL -ic` (falling back to `/bin/sh`), and output appears in a dismissible overlay before the view refreshes. `{update_script}` and `{branchup_script}` expand to bundled POSIX-sh scripts in `scripts/`, which diffnote writes to `$XDG_DATA_HOME/diffnote/scripts/` on first use. Replace those tokens with any command you like — including shell functions from your own `.zshrc`.
+
+The bundled scripts stash uncommitted changes, pull the base branch, and rebase/create a branch. They mutate the worktree; review `scripts/git_update.sh` and `scripts/branchup.sh` before using them. If the base branch does not exist locally, the header says so.
 
 Unknown keys are ignored. Duplicate key bindings produce a warning in the status line.
 
@@ -101,11 +113,14 @@ Comments survive restarts and re-anchor to the matching line when the diff chang
 
 ## Optional Rex integration
 
-`rex/diffnote.lua` binds `cmd+r` to open diffnote in a floating pane beside the focused agent. It is optional — diffnote works without Rex. Load it from your Rex `init.lua`:
+`rex/diffnote.lua` binds `cmd+shift+r` to open diffnote in a floating pane beside the focused agent. It is optional — diffnote works without Rex. The plugin resolves the `diffnote` binary through an interactive shell at setup time, because the Rex server runs with a minimal `PATH`; override `command` with an absolute path if yours is elsewhere. After editing `init.lua`, run `rex api call server.config_reload '{}'` so the binding registers. Load it from your Rex `init.lua`:
 
 ```lua
-dofile(os.getenv("HOME") .. "/path/to/diffnote/rex/diffnote.lua").setup()
+dofile(os.getenv("HOME") .. "/path/to/diffnote/rex/diffnote.lua")
+  .setup({ key = "cmd+shift+r" })
 ```
+
+Override `key` to any free chord, or set `key = false` to keep only the `diffnote_open` action in Rex's action palette. `command`, `ratio`, `float`, and `bounds` are overridable the same way.
 
 ## Contributing
 

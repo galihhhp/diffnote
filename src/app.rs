@@ -27,6 +27,10 @@ pub enum Mode {
     History,
     DiffSearch,
     CommentPanel,
+    CommandOutput,
+    BranchInput,
+    BasePicker,
+    RenameInput,
 }
 
 type PendingComment = (String, Section, Side, usize, String, String);
@@ -71,6 +75,14 @@ pub struct App {
     pub history_pick: usize,
     pub history_diff: Option<crate::diff::DiffDoc>,
     pub history_scroll: usize,
+    pub branch_state: git::BranchState,
+    pub command_title: String,
+    pub command_output: String,
+    pub branch_input: String,
+    pub h_scroll: u16,
+    pub base_branches: Vec<String>,
+    pub base_pick: usize,
+    pub rename_input: String,
     pub search_query: String,
     pub search_hits: Vec<usize>,
     pub search_pick: usize,
@@ -151,6 +163,14 @@ impl App {
             history_pick: 0,
             history_diff: None,
             history_scroll: 0,
+            branch_state: git::BranchState::default(),
+            command_title: String::new(),
+            command_output: String::new(),
+            branch_input: String::new(),
+            h_scroll: 0,
+            base_branches: Vec::new(),
+            base_pick: 0,
+            rename_input: String::new(),
             search_query: String::new(),
             search_hits: Vec::new(),
             search_pick: 0,
@@ -200,6 +220,7 @@ impl App {
         }
         self.comments.reanchor(&self.docs, &self.hashes);
         let _ = self.comments.save(&self.repo);
+        self.branch_state = git::branch_state(&self.repo, &self.config.base_branch);
         self.tree_token = git::tree_token(&self.repo);
         if self.selected >= self.snapshot.files.len() {
             self.selected = 0;
@@ -252,6 +273,14 @@ impl App {
             Mode::History => self.handle_history(&pressed),
             Mode::DiffSearch => self.handle_search(&pressed, key),
             Mode::CommentPanel => self.handle_comment_panel(&pressed),
+            Mode::CommandOutput => {
+                if pressed == "Esc" || pressed == "q" || pressed == self.config.key("quit") {
+                    self.mode = Mode::Normal;
+                }
+            }
+            Mode::BranchInput => self.handle_branch_input(&pressed, key),
+            Mode::BasePicker => self.handle_base_picker(&pressed),
+            Mode::RenameInput => self.handle_rename_input(&pressed, key),
         }
     }
 
@@ -307,12 +336,22 @@ impl App {
             "stage_hunk" => self.stage(true),
             "help" => self.mode = Mode::Help,
             "toggle_split" => self.split = !self.split,
+            "scroll_left" => self.h_scroll = self.h_scroll.saturating_sub(4),
+            "scroll_right" => self.h_scroll = self.h_scroll.saturating_add(4).min(400),
+            "scroll_reset" => self.h_scroll = 0,
+            "pick_base" => self.open_base_picker(),
+            "rename_branch" => self.open_rename_input(),
+            "push" => self.confirm_push(),
+            "force_push" => self.confirm_force_push(),
+            "pull" => self.confirm_pull(),
             "toggle_comments" => self.show_comments = !self.show_comments,
             "goto_file" => self.open_file_picker(),
             "focus_comments" => self.focus_comments(),
             "edit_comment" => self.start_edit_comment(),
             "resend_comments" => self.resend_comments(),
             "history" => self.open_history(),
+            "update_branch" => self.run_update(),
+            "branchup" => self.open_branch_input(),
             "search" => self.open_search(),
             "next_match" => self.cycle_match(1),
             "prev_match" => self.cycle_match(-1),
@@ -590,6 +629,174 @@ impl App {
         }
     }
 
+    fn open_base_picker(&mut self) {
+        self.base_branches = git::list_branches(&self.repo).unwrap_or_default();
+        self.base_pick = self
+            .base_branches
+            .iter()
+            .position(|name| name == &self.config.base_branch)
+            .unwrap_or(0);
+        self.mode = Mode::BasePicker;
+        if self.base_branches.is_empty() {
+            self.status = "no local branches".to_string();
+        }
+    }
+
+    fn handle_base_picker(&mut self, pressed: &str) {
+        if pressed == "Esc" || pressed == self.config.key("cancel") || pressed == "q" {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if pressed == "Up" || pressed == self.config.key("up") {
+            self.base_pick = self.base_pick.saturating_sub(1);
+            return;
+        }
+        if pressed == "Down" || pressed == self.config.key("down") {
+            self.base_pick = (self.base_pick + 1).min(self.base_branches.len().saturating_sub(1));
+            return;
+        }
+        if pressed == "Enter" || pressed == self.config.key("confirm") {
+            if let Some(name) = self.base_branches.get(self.base_pick).cloned() {
+                self.config.base_branch = name.clone();
+                self.branch_state = git::branch_state(&self.repo, &name);
+                self.status = format!("base branch set to {}", name);
+            }
+            self.mode = Mode::Normal;
+        }
+    }
+
+    fn open_rename_input(&mut self) {
+        self.rename_input.clear();
+        self.mode = Mode::RenameInput;
+    }
+
+    fn handle_rename_input(&mut self, pressed: &str, key: KeyEvent) {
+        if pressed == "Esc" || pressed == self.config.key("cancel") {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if pressed == "Backspace" {
+            self.rename_input.pop();
+            return;
+        }
+        if pressed == "C-u" {
+            self.rename_input.clear();
+            return;
+        }
+        if pressed == "Enter" || pressed == self.config.key("confirm") {
+            let name = self.rename_input.trim().to_string();
+            self.mode = Mode::Normal;
+            if name.is_empty() {
+                self.status = "branch name is empty".to_string();
+                return;
+            }
+            self.confirm_action = Some(format!("rename:{}", name));
+            self.mode = Mode::Confirm;
+            self.status = format!("Rename {} to {}?", self.branch_state.current, name);
+            return;
+        }
+        if let KeyCode::Char(character) = key.code {
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                self.rename_input.push(character);
+            }
+        }
+    }
+
+    fn confirm_push(&mut self) {
+        self.confirm_action = Some("push".to_string());
+        self.mode = Mode::Confirm;
+        self.status = format!("Push {}?", self.branch_state.current);
+    }
+
+    fn confirm_pull(&mut self) {
+        self.confirm_action = Some("pull".to_string());
+        self.mode = Mode::Confirm;
+        self.status = format!("Pull into {}?", self.branch_state.current);
+    }
+
+    fn confirm_force_push(&mut self) {
+        self.confirm_action = Some("force_push".to_string());
+        self.mode = Mode::Confirm;
+        self.status = format!(
+            "Force-with-lease push {}? Verify remote state first",
+            self.branch_state.current
+        );
+    }
+
+    fn open_branch_input(&mut self) {
+        self.branch_input.clear();
+        self.mode = Mode::BranchInput;
+    }
+
+    fn handle_branch_input(&mut self, pressed: &str, key: KeyEvent) {
+        if pressed == "Esc" || pressed == self.config.key("cancel") {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if pressed == "Backspace" {
+            self.branch_input.pop();
+            return;
+        }
+        if pressed == "C-u" {
+            self.branch_input.clear();
+            return;
+        }
+        if pressed == "Enter" || pressed == self.config.key("confirm") {
+            let name = self.branch_input.trim().to_string();
+            self.mode = Mode::Normal;
+            if name.is_empty() {
+                self.status = "branch name is empty".to_string();
+                return;
+            }
+            let command = self
+                .config
+                .branchup_command
+                .replace("{branch}", &name)
+                .replace("{base}", &self.config.base_branch);
+            self.run_command("branchup", &command);
+            return;
+        }
+        if let KeyCode::Char(character) = key.code {
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                self.branch_input.push(character);
+            }
+        }
+    }
+
+    fn run_update(&mut self) {
+        let command = self
+            .config
+            .update_command
+            .replace("{base}", &self.config.base_branch);
+        self.run_command("git_update", &command);
+    }
+
+    fn run_command(&mut self, title: &str, template: &str) {
+        let mut command = template.to_string();
+        for token in ["{update_script}", "{branchup_script}"] {
+            if let Some(path) = crate::scripts::command_path(token) {
+                command = command.replace(token, &crate::transport::shell_quote(&path.display().to_string()));
+            }
+        }
+        self.command_title = format!("{}: {}", title, command);
+        match git::run_shell(&self.repo, &command) {
+            Ok(output) => {
+                self.command_output = output;
+                self.status = format!("{} finished", title);
+            }
+            Err(error) => {
+                self.command_output = error.to_string();
+                self.status = format!("{} failed", title);
+            }
+        }
+        let _ = self.refresh();
+        self.mode = Mode::CommandOutput;
+    }
+
     pub fn poll_tree(&mut self) {
         if self.mode != Mode::Normal {
             return;
@@ -640,6 +847,7 @@ impl App {
             self.selected = (self.selected + length - 1) % length;
         }
         self.cursor = 0;
+        self.h_scroll = 0;
     }
 
     fn jump_hunk(&mut self, delta: i32) {
@@ -1085,6 +1293,7 @@ impl App {
             return;
         }
         if pressed == "Enter" || pressed == self.config.key("confirm") {
+            self.mode = Mode::Normal;
             if let Some(action) = self.confirm_action.take() {
                 if let Some(message) = action.strip_prefix("commit:") {
                     self.do_commit(message.to_string());
@@ -1100,6 +1309,55 @@ impl App {
                     } else {
                         self.status = "tree changed since render; press r to refresh".to_string();
                     }
+                } else if let Some(name) = action.strip_prefix("rename:") {
+                    match git::rename_branch(&self.repo, name) {
+                        Ok(_) => {
+                            self.status = format!("renamed to {}", name);
+                            let _ = self.refresh();
+                        }
+                        Err(error) => self.status = format!("rename failed: {}", error),
+                    }
+                } else if action == "pull" {
+                    self.command_title = "git pull".to_string();
+                    match git::pull_branch(&self.repo) {
+                        Ok(output) => {
+                            self.command_output = output;
+                            self.status = "pull finished".to_string();
+                        }
+                        Err(error) => {
+                            self.command_output = error.to_string();
+                            self.status = "pull failed".to_string();
+                        }
+                    }
+                    let _ = self.refresh();
+                    self.mode = Mode::CommandOutput;
+                } else if action == "push" || action == "force_push" {
+                    let force = action == "force_push";
+                    self.command_title = if force {
+                        "git push -u origin HEAD --force-with-lease".to_string()
+                    } else {
+                        "git push -u origin HEAD".to_string()
+                    };
+                    match git::push_branch(&self.repo, force) {
+                        Ok(output) => {
+                            self.command_output = output;
+                            self.status = if force {
+                                "force push finished".to_string()
+                            } else {
+                                "push finished".to_string()
+                            };
+                        }
+                        Err(error) => {
+                            self.command_output = error.to_string();
+                            self.status = if force {
+                                "force push failed".to_string()
+                            } else {
+                                "push failed".to_string()
+                            };
+                        }
+                    }
+                    let _ = self.refresh();
+                    self.mode = Mode::CommandOutput;
                 }
             }
         }

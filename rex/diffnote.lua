@@ -4,7 +4,7 @@ local TERMINAL = "com.superlogical.terminal"
 local LABEL = "diffnote"
 
 M.config = {
-  key = "cmd+r",
+  key = "cmd+shift+r",
   command = "diffnote",
   ratio = 0.4,
   float = true,
@@ -27,7 +27,8 @@ end
 
 local function blocks_of(session_id)
   local ok, res = pcall(rex.call, "session.list_blocks", { session_id = session_id })
-  return ok and res.blocks or {}
+  if not ok or type(res) ~= "table" or type(res.blocks) ~= "table" then return {} end
+  return res.blocks
 end
 
 local function layers_of(session_id)
@@ -123,8 +124,9 @@ local function show(session_id, b, anchor, layers)
 end
 
 function M.toggle(ctx)
-  local session_id = ctx.session_id or rex.session_id
-  local block_id = ctx.block_id or rex.block_id
+  local session_id = ctx.session_id or rex.session_id or os.getenv("REX_SESSION")
+  local block_id = ctx.block_id or rex.block_id or os.getenv("REX_BLOCK")
+  if not session_id then return nil end
   local blocks = blocks_of(session_id)
   local layers = layers_of(session_id)
   local focused
@@ -148,6 +150,16 @@ M.open = M.toggle
 
 function M.setup(opts)
   for k, v in pairs(opts or {}) do M.config[k] = v end
+  if M.config.command == "diffnote" or M.config.command == "" then
+    local result = rex.exec({ "/bin/zsh", "-lic", "command -v diffnote" })
+    local resolved = result and result.ok and result.stdout
+      and result.stdout:match("[^\n]+")
+    if resolved and resolved ~= "" then
+      M.config.command = resolved
+    else
+      M.config.command = os.getenv("HOME") .. "/.local/bin/diffnote"
+    end
+  end
   rex.action({
     name = "diffnote_open",
     title = "Show or hide diffnote",

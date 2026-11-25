@@ -235,6 +235,116 @@ pub struct CommitEntry {
     pub date: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct BranchState {
+    pub current: String,
+    pub base: String,
+    pub base_exists: bool,
+    pub ahead: usize,
+    pub behind: usize,
+    pub updated: bool,
+}
+
+pub fn list_branches(repo: &Path) -> Result<Vec<String>> {
+    let text = run(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "--sort=refname",
+            "refs/heads/",
+        ],
+    )?;
+    Ok(text
+        .lines()
+        .map(str::to_string)
+        .filter(|name| !name.is_empty())
+        .collect())
+}
+
+pub fn rename_branch(repo: &Path, name: &str) -> Result<String> {
+    run(repo, &["branch", "-m", name])
+}
+
+pub fn pull_branch(repo: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["pull"])
+        .current_dir(repo)
+        .output()?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(anyhow!("{}", text.trim()));
+    }
+    Ok(text)
+}
+
+pub fn push_branch(repo: &Path, force_with_lease: bool) -> Result<String> {
+    let mut args = vec!["push", "-u", "origin", "HEAD"];
+    if force_with_lease {
+        args.push("--force-with-lease");
+    }
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(repo)
+        .output()?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(anyhow!("{}", text.trim()));
+    }
+    Ok(text)
+}
+
+pub fn branch_state(repo: &Path, base: &str) -> BranchState {
+    let current = run(repo, &["symbolic-ref", "--short", "HEAD"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let mut state = BranchState {
+        current,
+        base: base.to_string(),
+        ..Default::default()
+    };
+    let base_ref = format!("refs/heads/{}", base);
+    if run(repo, &["show-ref", "--verify", "--quiet", &base_ref]).is_err() {
+        return state;
+    }
+    state.base_exists = true;
+    let Ok(count) = run(
+        repo,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{}...HEAD", base),
+        ],
+    ) else {
+        return state;
+    };
+    let parts: Vec<&str> = count.split_whitespace().collect();
+    if parts.len() >= 2 {
+        state.behind = parts[0].parse().unwrap_or(0);
+        state.ahead = parts[1].parse().unwrap_or(0);
+    }
+    state.updated = state.behind == 0;
+    state
+}
+
+pub fn run_shell(repo: &Path, command: &str) -> Result<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let output = Command::new(shell)
+        .args(["-ic", command])
+        .current_dir(repo)
+        .output()?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(anyhow!("{}", text.trim()));
+    }
+    Ok(text)
+}
+
 pub fn log(repo: &Path, limit: usize) -> Result<Vec<CommitEntry>> {
     let text = run(
         repo,

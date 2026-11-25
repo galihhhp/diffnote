@@ -20,6 +20,9 @@ pub struct Config {
     pub templates: HashMap<String, String>,
     pub clipboard_command: String,
     pub editor_command: String,
+    pub base_branch: String,
+    pub update_command: String,
+    pub branchup_command: String,
 }
 
 fn default_keys() -> HashMap<String, String> {
@@ -53,6 +56,8 @@ fn default_keys() -> HashMap<String, String> {
         ("edit_comment", "m"),
         ("resend_comments", "R"),
         ("history", "L"),
+        ("update_branch", "U"),
+        ("branchup", "B"),
         ("search", "/"),
         ("next_match", "n"),
         ("prev_match", "N"),
@@ -61,6 +66,14 @@ fn default_keys() -> HashMap<String, String> {
         ("newline", "C-j"),
         ("confirm", "Enter"),
         ("cancel", "Esc"),
+        ("scroll_left", "h"),
+        ("scroll_right", "l"),
+        ("scroll_reset", "0"),
+        ("pick_base", "p"),
+        ("rename_branch", "C"),
+        ("push", "P"),
+        ("force_push", "W"),
+        ("pull", "D"),
     ];
     pairs
         .iter()
@@ -191,6 +204,9 @@ impl Config {
             templates: default_templates(),
             clipboard_command: default_clipboard(),
             editor_command: default_editor(),
+            base_branch: "main".to_string(),
+            update_command: "{update_script} {base}".to_string(),
+            branchup_command: "{branchup_script} {branch} --base {base}".to_string(),
         };
         let path = config_path();
         let text = match std::fs::read_to_string(&path) {
@@ -247,6 +263,9 @@ impl Config {
                 "new_tab_command" => config.new_tab_command = value.to_string(),
                 "clipboard_command" => config.clipboard_command = value.to_string(),
                 "editor_command" => config.editor_command = value.to_string(),
+                "base_branch" => config.base_branch = value.to_string(),
+                "update_command" => config.update_command = value.to_string(),
+                "branchup_command" => config.branchup_command = value.to_string(),
                 "adapters" => {
                     let list = parse_list(&value);
                     if !list.is_empty() {
@@ -318,6 +337,9 @@ mod tests {
                 templates: default_templates(),
                 clipboard_command: "pbcopy".to_string(),
                 editor_command: "nvim".to_string(),
+                base_branch: "main".to_string(),
+                update_command: "git_update {base}".to_string(),
+                branchup_command: "branchup {branch} --base {base}".to_string(),
             };
             c.validate().unwrap();
             (c, String::new())

@@ -41,6 +41,10 @@ fn mode_accent(mode: &Mode) -> Color {
         Mode::History => Color::LightYellow,
         Mode::DiffSearch => Color::LightCyan,
         Mode::CommentPanel => Color::LightMagenta,
+        Mode::CommandOutput => Color::LightGreen,
+        Mode::BranchInput => Color::LightCyan,
+        Mode::BasePicker => Color::LightBlue,
+        Mode::RenameInput => Color::LightYellow,
         Mode::Normal => Color::Gray,
     }
 }
@@ -275,15 +279,18 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(index, entry)| {
             let selected = index == app.selected;
             let marker = if selected { ">" } else { " " };
-            let section_style = Style::default()
-                .fg(section_color(entry.section))
-                .add_modifier(Modifier::BOLD);
+            let color = section_color(entry.section);
             let comment_count = app
                 .comments
                 .items
                 .iter()
                 .filter(|comment| comment.path == entry.path)
                 .count();
+            let path_style = if selected {
+                Style::default().fg(color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(color)
+            };
             let mut spans = vec![
                 Span::styled(
                     marker,
@@ -294,21 +301,17 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
                     },
                 ),
                 Span::raw(" "),
-                Span::styled(entry.section.title(), section_style),
+                Span::styled(
+                    "▌",
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" "),
                 Span::styled(
                     format!("{:>2}", entry.status),
                     Style::default().fg(status_color(&entry.status)),
                 ),
                 Span::raw(" "),
-                Span::styled(
-                    entry.path.clone(),
-                    if selected {
-                        Style::default().add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    },
-                ),
+                Span::styled(entry.path.clone(), path_style),
             ];
             if comment_count > 0 {
                 spans.push(Span::styled(
@@ -331,10 +334,7 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
             Section::Untracked => untracked += 1,
         }
     }
-    let title = format!(
-        "Files  +{} ~{} ?{}",
-        staged, unstaged, untracked
-    );
+    let title = format!("Files  +{} ~{} ?{}", staged, unstaged, untracked);
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
@@ -383,12 +383,12 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
         );
         frame.render_widget(
             Paragraph::new(left_lines)
-                .scroll((offset, 0)),
+                .scroll((offset, app.h_scroll)),
             columns[0],
         );
         frame.render_widget(
             Paragraph::new(right_lines)
-                .scroll((offset, 0)),
+                .scroll((offset, app.h_scroll)),
             columns[1],
         );
     } else {
@@ -503,6 +503,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         (c.key("toggle_view"), "view"),
         ("f/F", "file"),
         ("]/[", "hunk"),
+        ("h/l/0", "pan"),
         (c.key("goto_file"), "jump"),
         (c.key("search"), "find"),
         ("n/N", "match"),
@@ -520,6 +521,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         (c.key("unstage_all"), "all"),
         (c.key("commit"), "commit"),
         (c.key("refresh"), "refresh"),
+        (c.key("update_branch"), "update"),
+        (c.key("branchup"), "new br"),
+        (c.key("pick_base"), "base"),
+        (c.key("rename_branch"), "rename"),
+        (c.key("push"), "push"),
+        (c.key("force_push"), "force"),
+        (c.key("pull"), "pull"),
     ];
     let agent = vec![
         (c.key("send"), "send"),
@@ -593,7 +601,7 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             " Confirm ",
             58,
             8,
-            vec![("Enter", "commit anyway"), ("Esc", "cancel")],
+            vec![("Enter", "confirm"), ("Esc", "cancel")],
         ),
         Mode::TargetPicker => (
             " Where to send ",
@@ -630,6 +638,30 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             72,
             9,
             vec![("Enter", "close"), ("n/N", "next/prev"), ("Esc", "close")],
+        ),
+        Mode::CommandOutput => (
+            " Command output ",
+            84,
+            24,
+            vec![("Esc", "close")],
+        ),
+        Mode::BranchInput => (
+            " New branch from base ",
+            64,
+            10,
+            vec![("Enter", "create"), ("Esc", "cancel")],
+        ),
+        Mode::BasePicker => (
+            " Choose base branch ",
+            62,
+            (app.base_branches.len() as u16 + 9).clamp(12, 26),
+            vec![("Enter", "select"), ("Esc", "cancel")],
+        ),
+        Mode::RenameInput => (
+            " Rename branch ",
+            64,
+            10,
+            vec![("Enter", "continue"), ("Esc", "cancel")],
         ),
         Mode::CommentPanel => return,
         Mode::Normal => return,
@@ -687,14 +719,29 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             let (head, sub) = match app.confirm_action.as_deref() {
                 Some("stage_all") => ("Stage every changed file?", "This adds all files to the index."),
                 Some("unstage_all") => ("Unstage every staged file?", "Your working files are not changed."),
+                Some("pull") => ("Pull into this branch?", "Runs git pull against the configured upstream."),
+                Some("push") => ("Push this branch to origin?", "Runs git push -u origin HEAD."),
+                Some("force_push") => (
+                    "Force-with-lease push to origin?",
+                    "Runs git push -u origin HEAD --force-with-lease. Rewrites remote history.",
+                ),
+                Some(action) if action.starts_with("rename:") => (
+                    "Rename the current branch?",
+                    "Only the local branch name changes.",
+                ),
                 _ => (
                     "The tree changed since the last render.",
                     "Refresh with r, or commit anyway.",
                 ),
             };
+            let head_color = if app.confirm_action.as_deref() == Some("force_push") {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
             lines.push(Line::from(Span::styled(
                 head,
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(head_color).add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -952,6 +999,82 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             lines.extend(field_lines(&app.search_query, field_width, accent));
             lines.push(Line::from(""));
         }
+        Mode::CommandOutput => {
+            lines.push(Line::from(Span::styled(
+                app.command_title.clone(),
+                Style::default().fg(Color::LightBlue),
+            )));
+            lines.push(Line::from(""));
+            let body = if app.command_output.trim().is_empty() {
+                "(no output)".to_string()
+            } else {
+                app.command_output.clone()
+            };
+            for text in body.lines() {
+                lines.push(Line::from(Span::styled(
+                    text.to_string(),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+        }
+        Mode::BranchInput => {
+            lines.push(Line::from(Span::styled(
+                format!("Create a branch from '{}'", app.config.base_branch),
+                Style::default().fg(Color::Gray),
+            )));
+            lines.push(Line::from(""));
+            lines.extend(field_lines(&app.branch_input, field_width, accent));
+            lines.push(Line::from(""));
+        }
+        Mode::BasePicker => {
+            lines.push(Line::from(Span::styled(
+                format!("Comparing against '{}'", app.config.base_branch),
+                Style::default().fg(Color::Gray),
+            )));
+            lines.push(Line::from(""));
+            let visible = (height as usize).saturating_sub(7).min(app.base_branches.len()).max(1);
+            let start = app.base_pick.saturating_sub(visible.saturating_sub(1));
+            for (position, name) in app.base_branches[start..].iter().take(visible).enumerate() {
+                let selected = start + position == app.base_pick;
+                let marker = if selected { "▸" } else { " " };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        marker,
+                        if selected {
+                            Style::default().fg(accent)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        name.clone(),
+                        if selected {
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        },
+                    ),
+                    if name == &app.config.base_branch {
+                        Span::styled("  current", Style::default().fg(Color::Green))
+                    } else {
+                        Span::raw("")
+                    },
+                ]));
+            }
+            lines.push(Line::from(""));
+        }
+        Mode::RenameInput => {
+            lines.push(Line::from(Span::styled(
+                format!("Rename '{}' to:", app.branch_state.current),
+                Style::default().fg(Color::Gray),
+            )));
+            lines.push(Line::from(""));
+            lines.extend(field_lines(&app.rename_input, field_width, accent));
+            lines.push(Line::from(""));
+        }
         Mode::CommentPanel => return,
         Mode::Normal => return,
     }
@@ -977,13 +1100,30 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(target) => format!("-> {}", target.label()),
         None => "no agent".to_string(),
     };
+    let branch = if app.branch_state.current.is_empty() {
+        "detached".to_string()
+    } else {
+        let status = if !app.branch_state.base_exists {
+            format!("base {} missing", app.branch_state.base)
+        } else if app.branch_state.updated {
+            format!("up to date with {}", app.branch_state.base)
+        } else {
+            format!(
+                "behind {} by {} (+{} ahead)",
+                app.branch_state.base, app.branch_state.behind, app.branch_state.ahead
+            )
+        };
+        format!("{} · {}", app.branch_state.current, status)
+    };
     let header = Paragraph::new(vec![
         Line::from(format!(
-            "diffnote | {} | {} | {} | {}",
+            "diffnote | {} | {} | {} | {} | {} | base:{}",
             app.repo.display(),
             app.snapshot.head,
+            branch,
             view,
-            paired
+            paired,
+            app.config.base_branch
         )),
         Line::from(app.status.clone()),
     ])
@@ -1004,8 +1144,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Percentage(30),
-                    Constraint::Percentage(70),
+                    Constraint::Percentage(26),
+                    Constraint::Percentage(74),
                 ])
                 .split(body);
             draw_files(frame, app, columns[0]);
