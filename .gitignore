@@ -1,0 +1,4 @@
+/target
+/.diffnote
+*.swp
+.DS_Store

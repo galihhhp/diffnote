@@ -1,0 +1,20 @@
+[package]
+name = "diffnote"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Review diffs, stage changes, commit, and send notes to a coding agent"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/galihhhp/diffnote"
+homepage = "https://github.com/galihhhp/diffnote"
+documentation = "https://github.com/galihhhp/diffnote#readme"
+keywords = ["git", "tui", "code-review", "ratatui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

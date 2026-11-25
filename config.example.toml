@@ -1,0 +1,58 @@
+send_mode = "submit"
+split = true
+show_comments = true
+adapters = ["rex", "tmux", "inbox", "clipboard"]
+agents = ["pi", "claude", "codex", "opencode", "aider", "goose", "cline"]
+
+new_tab_agent = "pi"
+clipboard_command = "pbcopy"
+editor_command = "nvim"
+
+
+[templates]
+pi = 'pi -- @{file} "Please address these review comments"'
+claude = 'claude "Please address the review comments in {file}"'
+codex = 'codex "Please address the review comments in {file}"'
+opencode = 'opencode run "Please address the review comments in {file}"'
+aider = 'aider --message-file {file}'
+goose = 'goose run --instructions {file}'
+cline = 'cline "Please address the review comments in {file}"'
+
+[keys]
+quit = "q"
+toggle_view = "Tab"
+down = "j"
+up = "k"
+next_hunk = "]"
+prev_hunk = "["
+next_file = "f"
+prev_file = "F"
+comment = "c"
+delete = "d"
+send = "s"
+new_tab = "t"
+pick_target = "S"
+copy = "y"
+refresh = "r"
+stage = "a"
+stage_all = "C-a"
+unstage = "u"
+unstage_all = "C-u"
+stage_hunk = "A"
+commit = "gc"
+help = "?"
+toggle_split = "v"
+toggle_comments = "b"
+goto_file = "o"
+focus_comments = "1"
+edit_comment = "m"
+resend_comments = "R"
+history = "L"
+search = "/"
+next_match = "n"
+prev_match = "N"
+open_editor_tab = "e"
+open_editor_float = "E"
+newline = "C-j"
+confirm = "Enter"
+cancel = "Esc"
