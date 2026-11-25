@@ -296,6 +296,10 @@ pub fn push_branch(repo: &Path, force_with_lease: bool) -> Result<String> {
     Ok(text)
 }
 
+pub fn is_detached(repo: &Path) -> bool {
+    run(repo, &["symbolic-ref", "-q", "--short", "HEAD"]).is_err()
+}
+
 pub fn branch_state(repo: &Path, base: &str) -> BranchState {
     let current = run(repo, &["symbolic-ref", "--short", "HEAD"])
         .unwrap_or_default()

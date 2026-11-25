@@ -25,6 +25,25 @@ local function foreground(session_id, block_id)
   return fg
 end
 
+local function exec_stdout(args)
+  local a, b, c = rex.exec(args)
+  if type(a) == "table" then
+    if a.ok and type(a.stdout) == "string" then return a.stdout end
+    return nil
+  end
+  if type(a) == "string" and c == 0 then return a end
+  return nil
+end
+
+local function repo_root(cwd)
+  if not cwd or cwd == "" then return nil end
+  local out = exec_stdout({ "git", "-C", cwd, "rev-parse", "--show-toplevel" })
+  if not out then return nil end
+  local root = out:match("^[^\n]+")
+  if root and root ~= "" then return root end
+  return nil
+end
+
 local function blocks_of(session_id)
   local ok, res = pcall(rex.call, "session.list_blocks", { session_id = session_id })
   if not ok or type(res) ~= "table" or type(res.blocks) ~= "table" then return {} end
@@ -136,6 +155,20 @@ function M.toggle(ctx)
   if focused and is_diffnote(focused) then return hide(session_id, focused, layers) end
   local fg = foreground(session_id, block_id)
   local cwd = fg.cwd or ""
+  if cwd == "" then cwd = os.getenv("HOME") or "." end
+  local repo = repo_root(cwd)
+  if not repo then
+    for _, b in ipairs(blocks) do
+      if b.block_id ~= block_id then
+        local other = foreground(session_id, b.block_id)
+        if other.cwd and other.cwd ~= "" then
+          repo = repo_root(other.cwd)
+          if repo then break end
+        end
+      end
+    end
+  end
+  if not repo then repo = cwd end
   local label = LABEL .. ":" .. tostring(block_id)
   for _, b in ipairs(blocks) do
     if b.label == label then
@@ -143,7 +176,7 @@ function M.toggle(ctx)
       return show(session_id, b, block_id, layers)
     end
   end
-  return open_new(session_id, block_id, focused and focused.window_id, cwd, label, block_id)
+  return open_new(session_id, block_id, focused and focused.window_id, repo, label, block_id)
 end
 
 M.open = M.toggle
@@ -151,9 +184,8 @@ M.open = M.toggle
 function M.setup(opts)
   for k, v in pairs(opts or {}) do M.config[k] = v end
   if M.config.command == "diffnote" or M.config.command == "" then
-    local result = rex.exec({ "/bin/zsh", "-lic", "command -v diffnote" })
-    local resolved = result and result.ok and result.stdout
-      and result.stdout:match("[^\n]+")
+    local out = exec_stdout({ "/bin/zsh", "-lic", "command -v diffnote" })
+    local resolved = out and out:match("[^\n]+")
     if resolved and resolved ~= "" then
       M.config.command = resolved
     else

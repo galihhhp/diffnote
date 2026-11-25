@@ -49,7 +49,7 @@ Run `?` inside diffnote for the full list. Defaults:
 | --- | --- |
 | Navigate | `Tab` view, `f`/`F` file, `]`/`[` hunk, `o` jump to file, `/` search, `n`/`N` match, `h`/`l`/`0` pan split view |
 | Review | `c` comment, `m` edit note, `1` focus notes, `R` resend, `s` send, `S` target |
-| Git | `a` stage, `C-a` stage all, `u` unstage, `C-u` unstage all, `A` stage hunk, `gc` commit, `r` refresh, `U` update branch, `B` new branch, `p` choose base branch, `C` rename branch, `D` pull, `P` push, `W` force-with-lease push |
+| Git | `g` opens the git command menu, `ga` stage, `gA` stage all, `gu` unstage, `gU` unstage all, `gh` stage hunk, `gc` commit, `gr` refresh, `gs` update branch, `gb` new branch, `gB` choose base, `gn` rename, `gl` pull, `gp` push, `gP` force-with-lease push |
 | View | `v` split, `b` comments, `L` commit log, `J`/`K` scroll log diff |
 | Tools | `t` new agent tab, `e` editor tab, `E` editor float, `?` help |
 
@@ -97,7 +97,7 @@ cline = 'cline "Please address the review comments in {file}"'
 | `rename_branch`, `push` | Key bindings for `C` (rename current branch) and `P` (`git push -u origin HEAD`), both confirmed before running |
 | `update_command`, `branchup_command` | Shell commands run with `U` / `B`; `{base}` and `{branch}` expand before running |
 
-`p` opens a list of local branches to pick the base for this session; the header and `U`/`B` update immediately. `C` prompts for a new name and renames the current local branch. `D` runs `git pull`, `P` runs `git push -u origin HEAD`, and `W` runs `git push -u origin HEAD --force-with-lease`. All four ask for confirmation first and show the command output afterward. `W` uses a red warning because it can rewrite remote history.
+All git command keys start with `g` (like `gc` for commit). Press `g` to open the menu, then the second key. `gB` opens a list of local branches to pick the base for this session; the header and `gs`/`gb` update immediately. `gn` prompts for a new name and renames the current local branch. `gl` runs `git pull`, `gp` runs `git push -u origin HEAD`, and `gP` runs `git push -u origin HEAD --force-with-lease`. All of them ask for confirmation first. `gP` uses a red warning because it can rewrite remote history. Every git command shows a loading overlay while it runs, then the command output. `gp` and `gP` refuse to run on a detached HEAD.
 
 `U` runs `update_command` and `B` prompts for a branch name then runs `branchup_command`. Both run through `$SHELL -ic` (falling back to `/bin/sh`), and output appears in a dismissible overlay before the view refreshes. `{update_script}` and `{branchup_script}` expand to bundled POSIX-sh scripts in `scripts/`, which diffnote writes to `$XDG_DATA_HOME/diffnote/scripts/` on first use. Replace those tokens with any command you like — including shell functions from your own `.zshrc`.
 

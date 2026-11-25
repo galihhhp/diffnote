@@ -31,9 +31,20 @@ pub enum Mode {
     BranchInput,
     BasePicker,
     RenameInput,
+    Loading,
 }
 
 type PendingComment = (String, Section, Side, usize, String, String);
+
+pub enum PendingCommand {
+    Shell { title: String, command: String },
+    Push { force: bool },
+    Pull,
+    Rename { name: String },
+    StageAll,
+    UnstageAll,
+    Refresh,
+}
 
 fn subsequence(query: &str, text: &str) -> bool {
     let mut chars = text.chars();
@@ -87,6 +98,9 @@ pub struct App {
     pub search_hits: Vec<usize>,
     pub search_pick: usize,
     pub comment_pick: usize,
+    pub pending_command: Option<PendingCommand>,
+    pub loading_label: String,
+    pub outside_repo: bool,
 }
 
 pub fn doc_key(entry: &FileEntry) -> String {
@@ -122,7 +136,7 @@ fn key_to_string(key: KeyEvent) -> String {
 
 impl App {
     pub fn new(repo: &Path, session: Option<String>, block: Option<String>) -> Result<App> {
-        let root = git::root_in(repo)?;
+        let root = git::root_in(repo).unwrap_or_else(|_| repo.to_path_buf());
         let comments = CommentStore::load(&root);
         let (config, warning) = Config::load();
         let split = config.split;
@@ -175,6 +189,9 @@ impl App {
             search_hits: Vec::new(),
             search_pick: 0,
             comment_pick: 0,
+            pending_command: None,
+            loading_label: String::new(),
+            outside_repo: false,
         };
         app.refresh()?;
         app.candidates = transport::candidates(
@@ -192,6 +209,9 @@ impl App {
         if !warning.is_empty() {
             app.status = warning;
         }
+        if app.outside_repo {
+            app.status = "not a git repository; open diffnote from a repo directory".to_string();
+        }
         Ok(app)
     }
 
@@ -205,6 +225,18 @@ impl App {
     }
 
     pub fn refresh(&mut self) -> Result<()> {
+        if git::root_in(&self.repo).is_err() {
+            self.outside_repo = true;
+            self.snapshot = Snapshot {
+                files: Vec::new(),
+                head: String::new(),
+            };
+            self.docs.clear();
+            self.hashes.clear();
+            self.status = "not a git repository; open diffnote from a repo directory".to_string();
+            return Ok(());
+        }
+        self.outside_repo = false;
         self.snapshot = git::snapshot(&self.repo)?;
         self.docs.clear();
         self.hashes.clear();
@@ -257,14 +289,7 @@ impl App {
         }
         match self.mode {
             Mode::Normal => self.handle_normal(&pressed),
-            Mode::PendingG => {
-                if pressed == "c" {
-                    self.input.clear();
-                    self.mode = Mode::CommitInput;
-                } else {
-                    self.mode = Mode::Normal;
-                }
-            }
+            Mode::PendingG => self.handle_pending_g(&pressed),
             Mode::CommentInput | Mode::CommitInput => self.handle_input(&pressed, key),
             Mode::TargetPicker => self.handle_target_picker(&pressed),
             Mode::Help => self.mode = Mode::Normal,
@@ -281,6 +306,7 @@ impl App {
             Mode::BranchInput => self.handle_branch_input(&pressed, key),
             Mode::BasePicker => self.handle_base_picker(&pressed),
             Mode::RenameInput => self.handle_rename_input(&pressed, key),
+            Mode::Loading => {}
         }
     }
 
@@ -293,14 +319,151 @@ impl App {
             self.move_cursor(1);
             return;
         }
-        if pressed == "g" && self.config.key("commit").starts_with('g') {
+        if pressed == "g"
+            && self
+                .config
+                .keys
+                .values()
+                .any(|key| key.starts_with('g') && key.len() > 1)
+        {
             self.mode = Mode::PendingG;
             return;
         }
         let Some(action) = self.config.action_for(pressed) else {
             return;
         };
-        match action.as_str() {
+        self.dispatch_action(&action);
+    }
+
+    pub fn queue(&mut self, command: PendingCommand, label: &str) {
+        self.pending_command = Some(command);
+        self.loading_label = label.to_string();
+        self.status = label.to_string();
+        self.mode = Mode::Loading;
+    }
+
+    pub fn execute_pending(&mut self) {
+        let Some(command) = self.pending_command.take() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        match command {
+            PendingCommand::Shell { title, command } => {
+                self.command_title = format!("{}: {}", title, command);
+                match git::run_shell(&self.repo, &command) {
+                    Ok(output) => {
+                        self.command_output = output;
+                        self.status = format!("{} finished", title);
+                    }
+                    Err(error) => {
+                        self.command_output = error.to_string();
+                        self.status = format!("{} failed", title);
+                    }
+                }
+                let _ = self.refresh();
+                self.mode = Mode::CommandOutput;
+            }
+            PendingCommand::Push { force } => {
+                self.command_title = if force {
+                    "git push -u origin HEAD --force-with-lease".to_string()
+                } else {
+                    "git push -u origin HEAD".to_string()
+                };
+                match git::push_branch(&self.repo, force) {
+                    Ok(output) => {
+                        self.command_output = output;
+                        self.status = if force {
+                            "force push finished".to_string()
+                        } else {
+                            "push finished".to_string()
+                        };
+                    }
+                    Err(error) => {
+                        self.command_output = error.to_string();
+                        self.status = if force {
+                            "force push failed".to_string()
+                        } else {
+                            "push failed".to_string()
+                        };
+                    }
+                }
+                let _ = self.refresh();
+                self.mode = Mode::CommandOutput;
+            }
+            PendingCommand::Pull => {
+                self.command_title = "git pull".to_string();
+                match git::pull_branch(&self.repo) {
+                    Ok(output) => {
+                        self.command_output = output;
+                        self.status = "pull finished".to_string();
+                    }
+                    Err(error) => {
+                        self.command_output = error.to_string();
+                        self.status = "pull failed".to_string();
+                    }
+                }
+                let _ = self.refresh();
+                self.mode = Mode::CommandOutput;
+            }
+            PendingCommand::Rename { name } => {
+                self.command_title = format!("git branch -m {}", name);
+                match git::rename_branch(&self.repo, &name) {
+                    Ok(_) => {
+                        self.command_output = format!("renamed to {}", name);
+                        self.status = format!("renamed to {}", name);
+                    }
+                    Err(error) => {
+                        self.command_output = error.to_string();
+                        self.status = format!("rename failed: {}", error);
+                    }
+                }
+                let _ = self.refresh();
+                self.mode = Mode::CommandOutput;
+            }
+            PendingCommand::StageAll => {
+                if self.guard() {
+                    self.report(git::stage_all(&self.repo), "staged all files");
+                } else {
+                    self.status = "tree changed since render; press gr to refresh".to_string();
+                }
+                self.mode = Mode::Normal;
+            }
+            PendingCommand::UnstageAll => {
+                if self.guard() {
+                    self.report(git::unstage_all(&self.repo), "unstaged all files");
+                } else {
+                    self.status = "tree changed since render; press gr to refresh".to_string();
+                }
+                self.mode = Mode::Normal;
+            }
+            PendingCommand::Refresh => {
+                self.report(Ok::<(), anyhow::Error>(()), "refreshed");
+                self.mode = Mode::Normal;
+            }
+        }
+    }
+
+    fn handle_pending_g(&mut self, pressed: &str) {
+        if pressed == "Esc" || pressed == self.config.key("cancel") {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let combo = format!("g{}", pressed);
+        let Some(action) = self.config.action_for(&combo) else {
+            self.status = format!("unknown git command {}", combo);
+            self.mode = Mode::Normal;
+            return;
+        };
+        self.mode = Mode::Normal;
+        self.dispatch_action(&action);
+    }
+
+    fn dispatch_action(&mut self, action: &str) {
+        match action {
+            "commit" => {
+                self.input.clear();
+                self.mode = Mode::CommitInput;
+            }
             "quit" => self.should_quit = true,
             "toggle_view" => {
                 self.view = match self.view {
@@ -328,7 +491,7 @@ impl App {
                 self.mode = Mode::TargetPicker;
             }
             "copy" => self.copy_payload(),
-            "refresh" => self.report(Ok::<(), anyhow::Error>(()), "refreshed"),
+            "refresh" => self.queue(PendingCommand::Refresh, "refreshing files"),
             "stage" => self.stage(false),
             "stage_all" => self.stage_all(),
             "unstage" => self.unstage(),
@@ -704,19 +867,37 @@ impl App {
         }
     }
 
+    fn reject_detached(&mut self) -> bool {
+        if git::is_detached(&self.repo) {
+            self.status = "detached HEAD: switch to a branch first".to_string();
+            true
+        } else {
+            false
+        }
+    }
+
     fn confirm_push(&mut self) {
+        if self.reject_detached() {
+            return;
+        }
         self.confirm_action = Some("push".to_string());
         self.mode = Mode::Confirm;
         self.status = format!("Push {}?", self.branch_state.current);
     }
 
     fn confirm_pull(&mut self) {
+        if self.reject_detached() {
+            return;
+        }
         self.confirm_action = Some("pull".to_string());
         self.mode = Mode::Confirm;
         self.status = format!("Pull into {}?", self.branch_state.current);
     }
 
     fn confirm_force_push(&mut self) {
+        if self.reject_detached() {
+            return;
+        }
         self.confirm_action = Some("force_push".to_string());
         self.mode = Mode::Confirm;
         self.status = format!(
@@ -782,19 +963,10 @@ impl App {
                 command = command.replace(token, &crate::transport::shell_quote(&path.display().to_string()));
             }
         }
-        self.command_title = format!("{}: {}", title, command);
-        match git::run_shell(&self.repo, &command) {
-            Ok(output) => {
-                self.command_output = output;
-                self.status = format!("{} finished", title);
-            }
-            Err(error) => {
-                self.command_output = error.to_string();
-                self.status = format!("{} failed", title);
-            }
-        }
-        let _ = self.refresh();
-        self.mode = Mode::CommandOutput;
+        self.queue(
+            PendingCommand::Shell { title: title.to_string(), command },
+            &format!("running {}", title),
+        );
     }
 
     pub fn poll_tree(&mut self) {
@@ -805,6 +977,9 @@ impl App {
             return;
         }
         self.last_tree_check = std::time::Instant::now();
+        if git::root_in(&self.repo).is_err() {
+            return;
+        }
         let token = git::tree_token(&self.repo);
         if token == self.tree_token {
             return;
@@ -1020,7 +1195,7 @@ impl App {
 
     fn stage(&mut self, hunk: bool) {
         if !self.guard() {
-            self.status = "tree changed since render; press r to refresh".to_string();
+            self.status = "tree changed since render; press gr to refresh".to_string();
             return;
         }
         let Some(entry) = self.current_file().cloned() else {
@@ -1029,7 +1204,7 @@ impl App {
         let key = doc_key(&entry);
         if hunk {
             if entry.section == Section::Untracked {
-                self.status = "use a to stage new files".to_string();
+                self.status = "use ga to stage new files".to_string();
                 return;
             }
             let patch = self.docs.get(&key).and_then(|doc| {
@@ -1052,7 +1227,7 @@ impl App {
 
     fn unstage(&mut self) {
         if !self.guard() {
-            self.status = "tree changed since render; press r to refresh".to_string();
+            self.status = "tree changed since render; press gr to refresh".to_string();
             return;
         }
         let Some(entry) = self.current_file().cloned() else {
@@ -1294,72 +1469,29 @@ impl App {
         }
         if pressed == "Enter" || pressed == self.config.key("confirm") {
             self.mode = Mode::Normal;
-            if let Some(action) = self.confirm_action.take() {
-                if let Some(message) = action.strip_prefix("commit:") {
-                    self.do_commit(message.to_string());
-                } else if action == "stage_all" {
-                    if self.guard() {
-                        self.report(git::stage_all(&self.repo), "staged all files");
-                    } else {
-                        self.status = "tree changed since render; press r to refresh".to_string();
-                    }
-                } else if action == "unstage_all" {
-                    if self.guard() {
-                        self.report(git::unstage_all(&self.repo), "unstaged all files");
-                    } else {
-                        self.status = "tree changed since render; press r to refresh".to_string();
-                    }
-                } else if let Some(name) = action.strip_prefix("rename:") {
-                    match git::rename_branch(&self.repo, name) {
-                        Ok(_) => {
-                            self.status = format!("renamed to {}", name);
-                            let _ = self.refresh();
-                        }
-                        Err(error) => self.status = format!("rename failed: {}", error),
-                    }
-                } else if action == "pull" {
-                    self.command_title = "git pull".to_string();
-                    match git::pull_branch(&self.repo) {
-                        Ok(output) => {
-                            self.command_output = output;
-                            self.status = "pull finished".to_string();
-                        }
-                        Err(error) => {
-                            self.command_output = error.to_string();
-                            self.status = "pull failed".to_string();
-                        }
-                    }
-                    let _ = self.refresh();
-                    self.mode = Mode::CommandOutput;
-                } else if action == "push" || action == "force_push" {
-                    let force = action == "force_push";
-                    self.command_title = if force {
-                        "git push -u origin HEAD --force-with-lease".to_string()
-                    } else {
-                        "git push -u origin HEAD".to_string()
-                    };
-                    match git::push_branch(&self.repo, force) {
-                        Ok(output) => {
-                            self.command_output = output;
-                            self.status = if force {
-                                "force push finished".to_string()
-                            } else {
-                                "push finished".to_string()
-                            };
-                        }
-                        Err(error) => {
-                            self.command_output = error.to_string();
-                            self.status = if force {
-                                "force push failed".to_string()
-                            } else {
-                                "push failed".to_string()
-                            };
-                        }
-                    }
-                    let _ = self.refresh();
-                    self.mode = Mode::CommandOutput;
-                }
+            let Some(action) = self.confirm_action.take() else {
+                return;
+            };
+            if let Some(message) = action.strip_prefix("commit:") {
+                self.do_commit(message.to_string());
+                return;
             }
+            let (command, label) = match action.as_str() {
+                "stage_all" => (PendingCommand::StageAll, "staging all files"),
+                "unstage_all" => (PendingCommand::UnstageAll, "unstaging all files"),
+                "pull" => (PendingCommand::Pull, "pulling from upstream"),
+                "push" => (PendingCommand::Push { force: false }, "pushing to origin"),
+                "force_push" => (PendingCommand::Push { force: true }, "force-with-lease pushing to origin"),
+                _ => {
+                    if let Some(name) = action.strip_prefix("rename:") {
+                        (PendingCommand::Rename { name: name.to_string() }, "renaming branch")
+                    } else {
+                        return;
+                    }
+                }
+            };
+            self.queue(command, label);
         }
     }
+
 }

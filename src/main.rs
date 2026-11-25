@@ -57,6 +57,10 @@ fn run(
         app.poll_editor();
         app.poll_tree();
         terminal.draw(|frame| ui::draw(frame, &app))?;
+        if app.mode == app::Mode::Loading {
+            app.execute_pending();
+            continue;
+        }
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) => {

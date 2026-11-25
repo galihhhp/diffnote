@@ -45,6 +45,7 @@ fn mode_accent(mode: &Mode) -> Color {
         Mode::BranchInput => Color::LightCyan,
         Mode::BasePicker => Color::LightBlue,
         Mode::RenameInput => Color::LightYellow,
+        Mode::Loading => Color::LightGreen,
         Mode::Normal => Color::Gray,
     }
 }
@@ -515,19 +516,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         (c.key("resend_comments"), "resend"),
     ];
     let git_ops = vec![
-        (c.key("stage"), "stage"),
-        (c.key("stage_all"), "all"),
-        (c.key("unstage"), "unstage"),
-        (c.key("unstage_all"), "all"),
+        ("g", "git cmds"),
         (c.key("commit"), "commit"),
-        (c.key("refresh"), "refresh"),
-        (c.key("update_branch"), "update"),
-        (c.key("branchup"), "new br"),
-        (c.key("pick_base"), "base"),
-        (c.key("rename_branch"), "rename"),
         (c.key("push"), "push"),
-        (c.key("force_push"), "force"),
         (c.key("pull"), "pull"),
+        (c.key("refresh"), "refresh"),
     ];
     let agent = vec![
         (c.key("send"), "send"),
@@ -622,10 +615,10 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             vec![("Enter", "jump"), ("Esc", "cancel")],
         ),
         Mode::PendingG => (
-            " Commit ",
-            48,
-            7,
-            vec![("c", "continue"), ("Esc", "cancel")],
+            " Git commands ",
+            58,
+            18,
+            vec![("Esc", "cancel")],
         ),
         Mode::History => (
             " Commit history ",
@@ -662,6 +655,12 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             64,
             10,
             vec![("Enter", "continue"), ("Esc", "cancel")],
+        ),
+        Mode::Loading => (
+            " Working ",
+            62,
+            8,
+            vec![("Esc", "wait")],
         ),
         Mode::CommentPanel => return,
         Mode::Normal => return,
@@ -860,9 +859,28 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         }
         Mode::PendingG => {
             lines.push(Line::from(Span::styled(
-                "Press c to open the commit message.",
+                "Git commands",
                 Style::default().fg(Color::Gray),
             )));
+            lines.push(Line::from(""));
+            let mut entries: Vec<(String, String)> = app
+                .config
+                .keys
+                .iter()
+                .filter(|(_, key)| key.starts_with('g') && key.len() > 1)
+                .map(|(action, key)| (key.clone(), action.clone()))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (key, action) in entries.iter().take(13) {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", key),
+                        Style::default().fg(Color::Black).bg(accent),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(action.clone(), Style::default().fg(Color::Gray)),
+                ]));
+            }
             lines.push(Line::from(""));
         }
         Mode::History => {
@@ -1073,6 +1091,18 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             )));
             lines.push(Line::from(""));
             lines.extend(field_lines(&app.rename_input, field_width, accent));
+            lines.push(Line::from(""));
+        }
+        Mode::Loading => {
+            lines.push(Line::from(Span::styled(
+                "Running git command, please wait...",
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                app.loading_label.clone(),
+                Style::default().fg(Color::Gray),
+            )));
             lines.push(Line::from(""));
         }
         Mode::CommentPanel => return,
