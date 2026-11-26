@@ -5,6 +5,7 @@ pub enum LineKind {
     Context,
     Add,
     Remove,
+    Conflict,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +143,20 @@ pub fn parse(raw: &str, path: &str) -> DiffDoc {
     }
 }
 
+fn is_marker(text: &str) -> bool {
+    text == "======="
+        || text.starts_with("<<<<<<< ")
+        || text.starts_with("||||||| ")
+        || text.starts_with(">>>>>>> ")
+}
+
+pub fn mark_conflicts(doc: &mut DiffDoc) {
+    for line in &mut doc.lines {
+        if is_marker(&line.text) {
+            line.kind = LineKind::Conflict;
+        }
+    }
+}
 pub fn patch_for_hunk(doc: &DiffDoc, index: usize) -> Option<String> {
     let hunk = doc.hunks.get(index)?;
     let mut patch = format!(
@@ -153,7 +168,7 @@ pub fn patch_for_hunk(doc: &DiffDoc, index: usize) -> Option<String> {
     for line in &doc.lines[hunk.start..hunk.end] {
         match line.kind {
             LineKind::Header | LineKind::Hunk => continue,
-            LineKind::Context => patch.push(' '),
+            LineKind::Context | LineKind::Conflict => patch.push(' '),
             LineKind::Add => patch.push('+'),
             LineKind::Remove => patch.push('-'),
         }
@@ -222,7 +237,7 @@ pub fn split_rows(doc: &DiffDoc) -> Vec<SplitRow> {
                     doc_index: index,
                 });
             }
-            LineKind::Context => {
+            LineKind::Context | LineKind::Conflict => {
                 flush_rows(&mut rows, &mut removes, &mut adds);
                 rows.push(SplitRow {
                     left: Some(cell(line)),
@@ -256,7 +271,7 @@ pub fn patch_for_selection(doc: &DiffDoc, start: usize, end: usize) -> Option<St
             let chosen = (low..=high).contains(&index);
             let marker = match line.kind {
                 LineKind::Header | LineKind::Hunk => continue,
-                LineKind::Context => ' ',
+                LineKind::Context | LineKind::Conflict => ' ',
                 LineKind::Add => {
                     if chosen {
                         changed = true;

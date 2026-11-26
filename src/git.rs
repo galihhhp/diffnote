@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 pub enum Section {
     Staged,
     Unstaged,
+    Unmerged,
     Untracked,
     Review,
 }
@@ -18,6 +19,7 @@ impl Section {
         match self {
             Section::Staged => "staged",
             Section::Unstaged => "unstaged",
+            Section::Unmerged => "unmerged",
             Section::Untracked => "untracked",
             Section::Review => "review",
         }
@@ -27,6 +29,7 @@ impl Section {
         match self {
             Section::Staged => "Staged",
             Section::Unstaged => "Unstaged",
+            Section::Unmerged => "Conflicts",
             Section::Untracked => "Untracked",
             Section::Review => "Review",
         }
@@ -94,6 +97,14 @@ pub fn snapshot(repo: &Path) -> Result<Snapshot> {
             });
             continue;
         }
+        if is_unmerged(&status) {
+            files.push(FileEntry {
+                path,
+                section: Section::Unmerged,
+                status,
+            });
+            continue;
+        }
         let bytes = status.as_bytes();
         let x = bytes[0] as char;
         let y = bytes[1] as char;
@@ -149,11 +160,122 @@ pub fn tree_token(repo: &Path) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-pub fn has_conflicts(repo: &Path) -> bool {
-    status_lines(repo).iter().any(|line| {
-        line.len() >= 2
-            && (line[..2].contains('U') || &line[..2] == "AA" || &line[..2] == "DD")
+fn is_unmerged(status: &str) -> bool {
+    status.len() == 2
+        && (status.contains('U') || status == "AA" || status == "DD")
+}
+
+pub fn conflict_label(status: &str) -> &'static str {
+    match status {
+        "UU" => "both modified",
+        "AA" => "both added",
+        "DD" => "both deleted",
+        "AU" => "added by us",
+        "UA" => "added by them",
+        "DU" => "deleted by us",
+        "UD" => "deleted by them",
+        _ => "unmerged",
+    }
+}
+
+pub fn conflict_count(repo: &Path) -> usize {
+    status_lines(repo)
+        .iter()
+        .filter(|line| line.len() >= 2 && is_unmerged(&line[..2]))
+        .count()
+}
+
+pub fn checkout_side(repo: &Path, path: &str, ours: bool) -> Result<()> {
+    let flag = if ours { "--ours" } else { "--theirs" };
+    run(repo, &["checkout", flag, "--", path])?;
+    run(repo, &["add", "--", path]).map(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Op {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl Op {
+    pub fn label(self, repo: &Path) -> String {
+        match self {
+            Op::Merge => "MERGING".to_string(),
+            Op::Rebase => {
+                let Some(path) = git_path(repo, "rebase-merge") else {
+                    return "REBASING".to_string();
+                };
+                let step = std::fs::read_to_string(path.join("msgnum")).unwrap_or_default();
+                let end = std::fs::read_to_string(path.join("end")).unwrap_or_default();
+                let (step, end) = (step.trim(), end.trim());
+                if step.is_empty() || end.is_empty() {
+                    "REBASING".to_string()
+                } else {
+                    format!("REBASING {}/{}", step, end)
+                }
+            }
+            Op::CherryPick => "CHERRY-PICKING".to_string(),
+            Op::Revert => "REVERTING".to_string(),
+        }
+    }
+}
+
+fn git_path(repo: &Path, name: &str) -> Option<PathBuf> {
+    let raw = run(repo, &["rev-parse", "--git-path", name]).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = Path::new(raw);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo.join(path)
     })
+}
+
+fn present(repo: &Path, name: &str) -> bool {
+    git_path(repo, name).is_some_and(|path| path.exists())
+}
+
+pub fn current_op(repo: &Path) -> Option<Op> {
+    if present(repo, "MERGE_HEAD") {
+        return Some(Op::Merge);
+    }
+    if present(repo, "rebase-merge") || present(repo, "rebase-apply") {
+        return Some(Op::Rebase);
+    }
+    if present(repo, "CHERRY_PICK_HEAD") {
+        return Some(Op::CherryPick);
+    }
+    if present(repo, "REVERT_HEAD") {
+        return Some(Op::Revert);
+    }
+    None
+}
+
+pub fn continue_op(repo: &Path) -> Result<()> {
+    match current_op(repo) {
+        Some(Op::Merge) => run(repo, &["commit", "--no-edit"]).map(|_| ()),
+        Some(Op::Rebase) => run(repo, &["-c", "core.editor=true", "rebase", "--continue"]).map(|_| ()),
+        Some(Op::CherryPick) => {
+            run(repo, &["-c", "core.editor=true", "cherry-pick", "--continue"]).map(|_| ())
+        }
+        Some(Op::Revert) => run(repo, &["-c", "core.editor=true", "revert", "--continue"]).map(|_| ()),
+        None => Err(anyhow!("no merge, rebase, cherry-pick, or revert in progress")),
+    }
+}
+
+pub fn abort_op(repo: &Path) -> Result<()> {
+    match current_op(repo) {
+        Some(Op::Merge) => run(repo, &["merge", "--abort"]).map(|_| ()),
+        Some(Op::Rebase) => run(repo, &["rebase", "--abort"]).map(|_| ()),
+        Some(Op::CherryPick) => run(repo, &["cherry-pick", "--abort"]).map(|_| ()),
+        Some(Op::Revert) => run(repo, &["revert", "--abort"]).map(|_| ()),
+        None => Err(anyhow!("no merge, rebase, cherry-pick, or revert in progress")),
+    }
 }
 
 pub fn stage_file(repo: &Path, path: &str) -> Result<()> {
@@ -315,15 +437,49 @@ pub fn branch_state(repo: &Path, base: &str) -> BranchState {
 pub fn run_shell(repo: &Path, command: &str) -> Result<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let output = Command::new(shell)
-        .args(["-ic", command])
+        .args(["-c", command])
         .current_dir(repo)
         .output()?;
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let text = strip_ansi(&text);
     if !output.status.success() {
         return Err(anyhow!("{}", text.trim()));
     }
     Ok(text)
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for n in chars.by_ref() {
+                    if ('@'..='~').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(n) = chars.next() {
+                    if n == '\u{7}' {
+                        break;
+                    }
+                    if n == '\u{1b}' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 pub fn log(repo: &Path, limit: usize) -> Result<Vec<CommitEntry>> {
@@ -462,6 +618,24 @@ pub fn diff_text(repo: &Path, path: &str, section: Section, context: usize) -> R
         }
         return Ok(patch);
     }
+    if section == Section::Unmerged {
+        // shortcut: whole conflict file as a context-only patch, no vs-ours/theirs view.
+        // Upgrade to a combined-diff parser if side-by-side comparison is needed.
+        let content = std::fs::read_to_string(repo.join(path)).ok();
+        let lines: Vec<&str> = content.as_deref().unwrap_or("(not in working tree)").lines().collect();
+        let count = lines.len().max(1);
+        let mut patch = format!(
+            "diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1,{n} +1,{n} @@\n",
+            p = path,
+            n = count
+        );
+        for line in lines {
+            patch.push(' ');
+            patch.push_str(line);
+            patch.push('\n');
+        }
+        return Ok(patch);
+    }
     let mut args: Vec<String> = vec!["diff".to_string()];
     if section == Section::Staged {
         args.push("--cached".to_string());
@@ -510,9 +684,20 @@ pub fn commit(repo: &Path, message: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, stage_patch, worktree_line};
+    use super::{
+        abort_op, checkout_side, conflict_count, continue_op, current_op, diff_text, run, snapshot,
+        stage_patch, strip_ansi, worktree_line, Op, Section,
+    };
     use std::path::Path;
     use std::process::Command;
+
+    #[test]
+    fn strip_ansi_drops_csi_and_osc() {
+        assert_eq!(strip_ansi("\u{1b}[1;36mhi\u{1b}[0m"), "hi");
+        assert_eq!(strip_ansi("\u{1b}]0;title\u{7}ok"), "ok");
+        assert_eq!(strip_ansi("\u{1b}]0;t\u{1b}\\ok"), "ok");
+        assert_eq!(strip_ansi("plain"), "plain");
+    }
 
     fn scratch() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("dn-map-test-{}", std::process::id()));
@@ -596,6 +781,120 @@ mod tests {
         stage_patch(&repo, &patch, true).unwrap();
         let staged = run(&repo, &["show", ":a.txt"]).unwrap();
         assert!(staged.contains("NEW-A"), "{}", staged);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    fn scratch_conflict(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("dn-cf-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&path).status().unwrap();
+        }
+        std::fs::write(path.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&path).status().unwrap();
+        Command::new("git").args(["commit", "-qm", "base"]).current_dir(&path).status().unwrap();
+        let base = super::run(&path, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "side"])
+            .current_dir(&path)
+            .status()
+            .unwrap();
+        std::fs::write(path.join("f.txt"), "one\nSIDE\nthree\n").unwrap();
+        Command::new("git").args(["commit", "-qam", "side"]).current_dir(&path).status().unwrap();
+        Command::new("git").args(["checkout", "-q", &base]).current_dir(&path).status().unwrap();
+        std::fs::write(path.join("f.txt"), "one\nMAIN\nthree\n").unwrap();
+        Command::new("git").args(["commit", "-qam", "main"]).current_dir(&path).status().unwrap();
+        Command::new("git")
+            .args(["merge", "side"])
+            .current_dir(&path)
+            .status()
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn conflict_is_one_unmerged_entry() {
+        let repo = scratch_conflict("entry");
+        let snap = snapshot(&repo).unwrap();
+        let hits: Vec<_> = snap
+            .files
+            .iter()
+            .filter(|entry| entry.path == "f.txt")
+            .collect();
+        assert_eq!(hits.len(), 1, "{:?}", snap.files);
+        assert_eq!(hits[0].section, Section::Unmerged);
+        assert_eq!(hits[0].status, "UU");
+        assert_eq!(conflict_count(&repo), 1);
+        assert_eq!(current_op(&repo), Some(Op::Merge));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn conflict_diff_shows_working_tree_with_markers() {
+        let repo = scratch_conflict("diff");
+        let raw = diff_text(&repo, "f.txt", Section::Unmerged, 3).unwrap();
+        assert!(raw.contains("\n <<<<<<< HEAD"), "{}", raw);
+        assert!(raw.contains("\n MAIN"), "{}", raw);
+        let mut doc = crate::diff::parse(&raw, "f.txt");
+        crate::diff::mark_conflicts(&mut doc);
+        assert_eq!(
+            doc.lines.iter().filter(|line| line.kind == crate::diff::LineKind::Conflict).count(),
+            3,
+            "{:?}",
+            doc.lines
+        );
+        let main = doc.lines.iter().find(|line| line.text == "MAIN").unwrap();
+        assert_eq!(main.new_no, Some(3));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn taking_a_side_resolves_the_file() {
+        let repo = scratch_conflict("ours");
+        checkout_side(&repo, "f.txt", true).unwrap();
+        assert_eq!(conflict_count(&repo), 0);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "one\nMAIN\nthree\n"
+        );
+        checkout_side(&repo, "f.txt", false).is_err();
+        let _ = std::fs::remove_dir_all(&repo);
+
+        let repo = scratch_conflict("theirs");
+        checkout_side(&repo, "f.txt", false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "one\nSIDE\nthree\n"
+        );
+        assert_eq!(conflict_count(&repo), 0);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn continue_and_abort_finish_the_merge() {
+        let repo = scratch_conflict("cont");
+        checkout_side(&repo, "f.txt", true).unwrap();
+        continue_op(&repo).unwrap();
+        assert_eq!(current_op(&repo), None);
+        let log = run(&repo, &["log", "-1", "--format=%s"]).unwrap();
+        assert!(log.contains("side"), "{}", log);
+
+        let repo2 = scratch_conflict("abort");
+        abort_op(&repo2).unwrap();
+        assert_eq!(current_op(&repo2), None);
+        assert_eq!(
+            std::fs::read_to_string(repo2.join("f.txt")).unwrap(),
+            "one\nMAIN\nthree\n"
+        );
+        let _ = std::fs::remove_dir_all(&repo2);
         let _ = std::fs::remove_dir_all(&repo);
     }
 

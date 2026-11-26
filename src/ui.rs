@@ -119,6 +119,7 @@ fn section_color(section: Section) -> Color {
     match section {
         Section::Staged => Color::Green,
         Section::Unstaged => Color::Yellow,
+        Section::Unmerged => Color::LightRed,
         Section::Untracked => Color::Cyan,
         Section::Review => Color::LightMagenta,
     }
@@ -128,6 +129,9 @@ fn status_color(status: &str) -> Color {
     let code = status.trim();
     if code == "??" {
         return Color::Cyan;
+    }
+    if code.contains('U') {
+        return Color::LightRed;
     }
     if code.contains('D') {
         return Color::Red;
@@ -163,6 +167,9 @@ fn prefix_style(kind: LineKind) -> Style {
         LineKind::Hunk => Style::default().fg(Color::Cyan),
         LineKind::Header => Style::default().fg(Color::DarkGray),
         LineKind::Context => Style::default().fg(Color::DarkGray),
+        LineKind::Conflict => Style::default()
+            .fg(Color::LightYellow)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
@@ -204,6 +211,7 @@ fn split_cell_line(
         LineKind::Context => "  ",
         LineKind::Add => "+ ",
         LineKind::Remove => "- ",
+        LineKind::Conflict => "! ",
     };
     let color = match cell.kind {
         LineKind::Header => Color::DarkGray,
@@ -211,6 +219,7 @@ fn split_cell_line(
         LineKind::Context => Color::Gray,
         LineKind::Add => Color::LightGreen,
         LineKind::Remove => Color::LightRed,
+        LineKind::Conflict => Color::LightYellow,
     };
     let number = cell
         .number
@@ -306,6 +315,7 @@ fn diff_lines(app: &App, doc: &DiffDoc, key: &str) -> Vec<Line<'static>> {
                 LineKind::Context => "  ",
                 LineKind::Add => "+ ",
                 LineKind::Remove => "- ",
+                LineKind::Conflict => "! ",
             };
             let color = match line.kind {
                 LineKind::Header => Color::DarkGray,
@@ -313,6 +323,7 @@ fn diff_lines(app: &App, doc: &DiffDoc, key: &str) -> Vec<Line<'static>> {
                 LineKind::Context => Color::Gray,
                 LineKind::Add => Color::LightGreen,
                 LineKind::Remove => Color::LightRed,
+                LineKind::Conflict => Color::LightYellow,
             };
             let number = line
                 .new_no
@@ -436,15 +447,21 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
     let mut staged = 0usize;
     let mut unstaged = 0usize;
     let mut untracked = 0usize;
+    let mut conflicts = 0usize;
     for entry in &app.snapshot.files {
         match entry.section {
             Section::Staged => staged += 1,
             Section::Unstaged => unstaged += 1,
+            Section::Unmerged => conflicts += 1,
             Section::Untracked => untracked += 1,
             Section::Review => {}
         }
     }
-    let title = format!("Files  +{} ~{} ?{}", staged, unstaged, untracked);
+    let title = if conflicts > 0 {
+        format!("Files  +{} ~{} ?{} !{}", staged, unstaged, untracked, conflicts)
+    } else {
+        format!("Files  +{} ~{} ?{}", staged, unstaged, untracked)
+    };
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
@@ -464,10 +481,13 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(empty, area);
         return;
     };
-    let section = app
-        .current_file()
-        .map(|entry| entry.section.title())
-        .unwrap_or("Diff");
+    let section = match app.current_file() {
+        Some(entry) if entry.section == Section::Unmerged => {
+            format!("Conflicts · {}", crate::git::conflict_label(&entry.status))
+        }
+        Some(entry) => entry.section.title().to_string(),
+        None => "Diff".to_string(),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(if app.split {
@@ -959,6 +979,10 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
                     "Force-with-lease push to origin?",
                     "Runs git push -u origin HEAD --force-with-lease. Rewrites remote history.",
                 ),
+                Some("abort_op") => (
+                    "Abort the operation?",
+                    "Drops the in-progress merge, rebase, cherry-pick, or revert and every conflict resolution you made.",
+                ),
                 Some(action) if action.starts_with("rename:") => (
                     "Rename the current branch?",
                     "Only the local branch name changes.",
@@ -968,7 +992,9 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
                     "Refresh with r, or commit anyway.",
                 ),
             };
-            let head_color = if app.confirm_action.as_deref() == Some("force_push") {
+            let head_color = if app.confirm_action.as_deref() == Some("force_push")
+                || app.confirm_action.as_deref() == Some("abort_op")
+            {
                 Color::Red
             } else {
                 Color::Yellow
@@ -1219,6 +1245,7 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
                         LineKind::Context => ("  ", Color::Gray),
                         LineKind::Add => ("+ ", Color::Green),
                         LineKind::Remove => ("- ", Color::Red),
+                        LineKind::Conflict => ("! ", Color::LightYellow),
                     };
                     diff_lines.push(Line::from(Span::styled(
                         format!("{}{}", prefix, diff_line.text),
@@ -1412,6 +1439,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
             )
         };
         header_spans.push(Span::styled(text, Style::default().fg(color)));
+    }
+    if let Some(state) = &app.merge_state {
+        header_spans.push(sep());
+        header_spans.push(Span::styled(
+            format!("{} · {} unmerged", state, app.conflict_count),
+            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        ));
     }
     header_spans.push(sep());
     header_spans.push(Span::styled(view, Style::default().fg(Color::Cyan)));

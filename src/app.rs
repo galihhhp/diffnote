@@ -113,6 +113,8 @@ pub struct App {
     pub whole_file: bool,
     pub stashes: Vec<(String, String)>,
     pub stash_pick: usize,
+    pub merge_state: Option<String>,
+    pub conflict_count: usize,
 }
 
 pub fn doc_key(entry: &FileEntry) -> String {
@@ -209,6 +211,8 @@ impl App {
             whole_file: false,
             stashes: Vec::new(),
             stash_pick: 0,
+            merge_state: None,
+            conflict_count: 0,
         };
         app.refresh()?;
         app.candidates = transport::candidates(
@@ -264,7 +268,10 @@ impl App {
             let context = if self.whole_file { 100_000 } else { 3 };
             let raw = git::diff_text(&self.repo, &entry.path, entry.section, context)
                 .unwrap_or_default();
-            let doc = crate::diff::parse(&raw, &entry.path);
+            let mut doc = crate::diff::parse(&raw, &entry.path);
+            if entry.section == Section::Unmerged {
+                crate::diff::mark_conflicts(&mut doc);
+            }
             let lines: Vec<String> = doc.lines.iter().map(|line| line.text.clone()).collect();
             self.tokens
                 .insert(key.clone(), crate::highlight::highlight(&entry.path, &lines));
@@ -274,6 +281,8 @@ impl App {
                 git::content_hash(&self.repo, &entry.path, entry.section),
             );
         }
+        self.conflict_count = git::conflict_count(&self.repo);
+        self.merge_state = git::current_op(&self.repo).map(|op| op.label(&self.repo));
         self.stashes = git::stash_list(&self.repo);
         if self.stash_pick >= self.stashes.len() {
             self.stash_pick = self.stashes.len().saturating_sub(1);
@@ -576,6 +585,12 @@ impl App {
             }
             "stash_push" => self.open_stash_title(),
             "stash_pop" => self.open_stash_picker(),
+            "take_ours" => self.take_side(true),
+            "take_theirs" => self.take_side(false),
+            "continue_op" => self.run_op(true),
+            "abort_op" => self.confirm_abort(),
+            "next_conflict" => self.jump_conflict(1),
+            "prev_conflict" => self.jump_conflict(-1),
             "stage_selection" => {
                 if let Some(anchor) = self.visual_anchor {
                     self.queue(
@@ -1265,7 +1280,22 @@ impl App {
         }
     }
 
+    fn reject_bulk_index_op(&mut self, action: &str) -> bool {
+        let conflicts = git::conflict_count(&self.repo);
+        if conflicts == 0 {
+            return false;
+        }
+        self.status = format!(
+            "{} would touch {} unmerged path(s): resolve them first (ga marks one resolved, gx aborts)",
+            action, conflicts
+        );
+        true
+    }
+
     fn stage_all(&mut self) {
+        if self.reject_bulk_index_op("staging all") {
+            return;
+        }
         self.confirm_action = Some("stage_all".to_string());
         self.mode = Mode::Confirm;
         self.status = format!(
@@ -1275,6 +1305,9 @@ impl App {
     }
 
     fn unstage_all(&mut self) {
+        if self.reject_bulk_index_op("unstaging all") {
+            return;
+        }
         self.confirm_action = Some("unstage_all".to_string());
         self.mode = Mode::Confirm;
         self.status = format!(
@@ -1297,6 +1330,11 @@ impl App {
                 self.status = "use ga to stage new files".to_string();
                 return;
             }
+            if entry.section == Section::Unmerged {
+                self.status = "hunk staging does not work on conflicts; press ga to mark resolved"
+                    .to_string();
+                return;
+            }
             let patch = self.docs.get(&key).and_then(|doc| {
                 let index = doc.lines.get(self.cursor).map(|line| line.hunk).unwrap_or(0);
                 crate::diff::patch_for_hunk(doc, index)
@@ -1312,7 +1350,12 @@ impl App {
             self.status = "already staged".to_string();
             return;
         }
-        self.report(git::stage_file(&self.repo, &entry.path), "file staged");
+        let success = if entry.section == Section::Unmerged {
+            "conflict marked resolved"
+        } else {
+            "file staged"
+        };
+        self.report(git::stage_file(&self.repo, &entry.path), success);
     }
 
     fn unstage(&mut self) {
@@ -1494,8 +1537,12 @@ impl App {
             return;
         }
         let message = self.input.clone();
-        if git::has_conflicts(&self.repo) {
-            self.status = "unmerged paths; resolve conflicts first".to_string();
+        let conflicts = git::conflict_count(&self.repo);
+        if conflicts > 0 {
+            self.status = format!(
+                "{} unmerged path(s); press g then o/t to pick a side, k to continue, x to abort",
+                conflicts
+            );
             self.mode = Mode::Normal;
             return;
         }
@@ -1554,6 +1601,10 @@ impl App {
             };
             if let Some(message) = action.strip_prefix("commit:") {
                 self.do_commit(message.to_string());
+                return;
+            }
+            if action == "abort_op" {
+                self.run_op(false);
                 return;
             }
             let (command, label) = match action.as_str() {
@@ -1694,6 +1745,90 @@ impl App {
         };
         self.report(git::stage_patch(&self.repo, &patch, true), "selected lines staged");
     }
+
+    fn resolved(&mut self, result: Result<()>, success: &str) {
+        let status = match &result {
+            Ok(_) => success.to_string(),
+            Err(error) => error.to_string(),
+        };
+        let _ = self.refresh();
+        self.status = status;
+    }
+
+    fn take_side(&mut self, ours: bool) {
+        if !self.guard() {
+            self.status = "tree changed since render; press gr to refresh".to_string();
+            return;
+        }
+        let Some(entry) = self.current_file().cloned() else {
+            return;
+        };
+        if entry.section != Section::Unmerged {
+            self.status = "this file has no conflicts".to_string();
+            return;
+        }
+        let label = if ours { "kept ours" } else { "kept theirs" };
+        self.resolved(
+            git::checkout_side(&self.repo, &entry.path, ours),
+            &format!("{} {}", entry.path, label),
+        );
+    }
+
+    fn confirm_abort(&mut self) {
+        if git::current_op(&self.repo).is_none() {
+            self.status = "no merge, rebase, cherry-pick, or revert in progress".to_string();
+            return;
+        }
+        self.confirm_action = Some("abort_op".to_string());
+        self.mode = Mode::Confirm;
+        self.status = "Abort? Conflict resolutions in the working tree are lost".to_string();
+    }
+
+    fn run_op(&mut self, cont: bool) {
+        let Some(op) = git::current_op(&self.repo) else {
+            self.status = "no merge, rebase, cherry-pick, or revert in progress".to_string();
+            return;
+        };
+        let label = op.label(&self.repo);
+        let result = if cont {
+            git::continue_op(&self.repo)
+        } else {
+            git::abort_op(&self.repo)
+        };
+        let done = if cont {
+            format!("{} continued", label)
+        } else {
+            format!("{} aborted", label)
+        };
+        self.resolved(result, &done);
+    }
+
+    fn jump_conflict(&mut self, delta: i32) {
+        let positions: Vec<usize> = self
+            .current_doc()
+            .map(|doc| {
+                doc.lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| line.kind == LineKind::Conflict)
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if positions.is_empty() {
+            self.status = "no conflict markers in this file".to_string();
+            return;
+        }
+        let target = if delta > 0 {
+            positions.iter().find(|&&item| item > self.cursor)
+        } else {
+            positions.iter().rev().find(|&&item| item < self.cursor)
+        };
+        if let Some(&position) = target {
+            self.cursor = position;
+        }
+    }
+
     fn open_stash_title(&mut self) {
         self.input.clear();
         self.mode = Mode::StashTitle;

@@ -50,11 +50,20 @@ Run `?` inside diffnote for the full list. Defaults:
 | Navigate | `Tab` view, `f`/`F` file, `]`/`[` hunk, `o` jump to file, `/` search, `n`/`N` match, `h`/`l`/`0` pan split view |
 | Review | `c` comment, `m` edit note, `1` focus notes, `R` resend, `s` send, `S` target |
 | Git | `g` opens the git command menu, `ga` stage, `gA` stage all, `gu` unstage, `gU` unstage all, `gh` stage hunk, `gc` commit, `gr` refresh, `gs` update branch, `gb` new branch, `gB` choose base, `gn` rename, `gl` pull, `gp` push, `gP` force-with-lease push, `gz` stash push (asks for a title), `gZ` stash pop (pick from a list) |
+| Conflicts | `go` keep ours, `gt` keep theirs, `ga` mark resolved, `g]`/`g[` next/prev marker, `gk` continue merge or rebase, `gx` abort it (confirmed) |
 | View | `v` split, `b` comments, `L` commit log, `J`/`K` scroll log diff |
 | Tools | `t` new agent tab, `e` editor tab, `E` editor float, `?` help |
 | Select | `V` select lines, then `A` stage selection or `c` range comment |
 
 Multiline input: `C-j` or `Shift+Enter` for a newline, `Enter` to commit, `C-u` to clear. Pasting multiline text works too.
+
+## Conflicts
+
+A conflicted file appears once, under `Conflicts`, labelled `UU`/`AA`/`DU`/... in the list and `both modified`/`deleted by us`/... in the diff title. The diff shows the working tree with the markers highlighted, so line numbers match the real file and comments land on the right line.
+
+Resolve one file with `go` (ours) or `gt` (theirs), which checks out that side and stages it, or edit by hand with `e` and press `ga`. When `git status` reports nothing left to resolve, `gk` finishes the merge, rebase, cherry-pick, or revert without opening an editor; `gx` aborts it and drops the resolutions.
+
+Commit, `gA`, and `gU` are blocked while conflicts exist, because staging a conflicted file records the markers and `git reset` throws away the conflict stages.
 
 ## Config
 
