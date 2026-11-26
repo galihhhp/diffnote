@@ -12,6 +12,7 @@ update_command = "{update_script} {base}"
 branchup_command = "{branchup_script} {branch} --base {base}"
 
 
+
 [templates]
 pi = 'pi -- @{file} "Please address these review comments"'
 claude = 'claude "Please address the review comments in {file}"'
@@ -47,7 +48,8 @@ help = "?"
 toggle_split = "v"
 toggle_comments = "b"
 goto_file = "o"
-focus_comments = "1"
+focus_comments = "p"
+toggle_whole_file = "M"
 edit_comment = "m"
 resend_comments = "R"
 history = "L"
@@ -67,5 +69,8 @@ scroll_reset = "0"
 pick_base = "gB"
 rename_branch = "gn"
 push = "gp"
+stash_push = "gz"
+stash_pop = "gZ"
 force_push = "gP"
 pull = "gl"
+stage_selection = "A"

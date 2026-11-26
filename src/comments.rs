@@ -30,6 +30,30 @@ pub struct Comment {
     pub text: String,
     pub sent: bool,
     pub orphan: bool,
+    #[serde(default)]
+    pub end_line: Option<usize>,
+    #[serde(default)]
+    pub code: Vec<String>,
+}
+
+impl Comment {
+    pub fn label(&self) -> String {
+        match self.end_line {
+            Some(end) if end != self.line_no => format!("{}-{}", self.line_no, end),
+            _ => self.line_no.to_string(),
+        }
+    }
+}
+
+pub struct Draft {
+    pub path: String,
+    pub section: Section,
+    pub side: Side,
+    pub line_no: usize,
+    pub end_line: Option<usize>,
+    pub line_text: String,
+    pub code: Vec<String>,
+    pub content_hash: String,
 }
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
@@ -39,28 +63,21 @@ pub struct CommentStore {
 }
 
 impl CommentStore {
-    pub fn add(
-        &mut self,
-        path: String,
-        section: Section,
-        side: Side,
-        line_no: usize,
-        line_text: String,
-        content_hash: String,
-        text: String,
-    ) {
+    pub fn add(&mut self, draft: Draft, text: String) {
         self.next_id += 1;
         self.items.push(Comment {
             id: self.next_id,
-            path,
-            section,
-            side,
-            line_no,
-            line_text,
-            content_hash,
+            path: draft.path,
+            section: draft.section,
+            side: draft.side,
+            line_no: draft.line_no,
+            line_text: draft.line_text,
+            content_hash: draft.content_hash,
             text,
             sent: false,
             orphan: false,
+            end_line: draft.end_line,
+            code: draft.code,
         });
     }
 
@@ -77,7 +94,13 @@ impl CommentStore {
     pub fn for_line(&self, path: &str, line_no: usize) -> Vec<&Comment> {
         self.items
             .iter()
-            .filter(|comment| comment.path == path && comment.line_no == line_no)
+            .filter(|comment| {
+                comment.path == path
+                    && (comment.line_no == line_no
+                        || comment
+                            .end_line
+                            .is_some_and(|end| (comment.line_no.min(end)..=comment.line_no.max(end)).contains(&line_no)))
+            })
             .collect()
     }
 
@@ -87,11 +110,14 @@ impl CommentStore {
             out.push_str(&format!(
                 "{}:{}-{} — {}\n",
                 comment.path,
-                comment.line_no,
+                comment.label(),
                 comment.side.tag(),
                 comment.text
             ));
-            if !comment.line_text.is_empty() {
+            for line in &comment.code {
+                out.push_str(&format!("    | {}\n", line));
+            }
+            if comment.code.is_empty() && !comment.line_text.is_empty() {
                 out.push_str(&format!("    | {}\n", comment.line_text));
             }
             if comment.orphan {
@@ -125,7 +151,12 @@ impl CommentStore {
             });
             match found {
                 Some(line) => {
-                    comment.line_no = line.new_no.or(line.old_no).unwrap_or(comment.line_no);
+                    let next = line.new_no.or(line.old_no).unwrap_or(comment.line_no);
+                    let delta = next as isize - comment.line_no as isize;
+                    comment.line_no = next;
+                    comment.end_line = comment
+                        .end_line
+                        .map(|end| ((end as isize) + delta).max(1) as usize);
                     comment.orphan = false;
                 }
                 None => comment.orphan = true,
@@ -133,6 +164,7 @@ impl CommentStore {
             comment.content_hash = new_hash.clone();
         }
     }
+
     pub fn save(&self, repo: &Path) -> std::io::Result<()> {
         let dir = repo.join(".diffnote");
         std::fs::create_dir_all(&dir)?;
@@ -174,5 +206,49 @@ impl CommentStore {
             }
         }
         count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn draft() -> Draft {
+        Draft {
+            path: "a.rs".to_string(),
+            section: Section::Unstaged,
+            side: Side::Right,
+            line_no: 4,
+            end_line: Some(6),
+            line_text: "let x = 1;".to_string(),
+            code: vec!["let x = 1;".to_string(), "let y = 2;".to_string()],
+            content_hash: "abc".to_string(),
+        }
+    }
+
+    #[test]
+    fn range_comment_payload_includes_range_and_code() {
+        let mut store = CommentStore::default();
+        store.add(draft(), "rename this".to_string());
+        let payload = store.payload(Path::new("/tmp/repo"));
+        assert!(payload.contains("a.rs:4-6-right"));
+        assert!(payload.contains("| let y = 2;"));
+    }
+
+    #[test]
+    fn for_line_matches_inside_range() {
+        let mut store = CommentStore::default();
+        store.add(draft(), "rename this".to_string());
+        assert_eq!(store.for_line("a.rs", 5).len(), 1);
+        assert_eq!(store.for_line("a.rs", 9).len(), 0);
+    }
+
+    #[test]
+    fn legacy_json_without_new_fields_loads() {
+        let raw = r#"{"items":[{"id":1,"path":"a.rs","section":"Unstaged","side":"Right","line_no":2,"line_text":"x","content_hash":"h","text":"note","sent":false,"orphan":false}],"next_id":1}"#;
+        let store: CommentStore = serde_json::from_str(raw).unwrap();
+        assert_eq!(store.items.len(), 1);
+        assert_eq!(store.items[0].end_line, None);
+        assert!(store.items[0].code.is_empty());
     }
 }

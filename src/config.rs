@@ -38,7 +38,6 @@ fn default_keys() -> HashMap<String, String> {
         ("comment", "c"),
         ("delete", "d"),
         ("send", "s"),
-        ("new_tab", "t"),
         ("pick_target", "S"),
         ("copy", "y"),
         ("refresh", "gr"),
@@ -52,7 +51,8 @@ fn default_keys() -> HashMap<String, String> {
         ("toggle_split", "v"),
         ("toggle_comments", "b"),
         ("goto_file", "o"),
-        ("focus_comments", "1"),
+        ("focus_comments", "p"),
+        ("toggle_whole_file", "M"),
         ("edit_comment", "m"),
         ("resend_comments", "R"),
         ("history", "L"),
@@ -72,8 +72,12 @@ fn default_keys() -> HashMap<String, String> {
         ("pick_base", "gB"),
         ("rename_branch", "gn"),
         ("push", "gp"),
+        ("stash_push", "gz"),
+        ("stash_pop", "gZ"),
         ("force_push", "gP"),
         ("pull", "gl"),
+        ("visual_select", "V"),
+        ("stage_selection", "A"),
     ];
     pairs
         .iter()
@@ -325,7 +329,7 @@ mod tests {
     #[test]
     fn default_new_tab_command_is_pi() {
         let (config, _) = {
-            let mut c = Config {
+            let c = Config {
                 keys: default_keys(),
                 send_mode: SendMode::Submit,
                 adapters: vec!["rex".to_string()],

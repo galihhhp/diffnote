@@ -213,7 +213,8 @@ pub fn split_rows(doc: &DiffDoc) -> Vec<SplitRow> {
     let mut adds: Vec<(usize, SplitCell)> = Vec::new();
     for (index, line) in doc.lines.iter().enumerate() {
         match line.kind {
-            LineKind::Header | LineKind::Hunk => {
+            LineKind::Header => continue,
+            LineKind::Hunk => {
                 flush_rows(&mut rows, &mut removes, &mut adds);
                 rows.push(SplitRow {
                     left: Some(cell(line)),
@@ -235,4 +236,85 @@ pub fn split_rows(doc: &DiffDoc) -> Vec<SplitRow> {
     }
     flush_rows(&mut rows, &mut removes, &mut adds);
     rows
+}
+
+pub fn patch_for_selection(doc: &DiffDoc, start: usize, end: usize) -> Option<String> {
+    let low = start.min(end);
+    let high = start.max(end);
+    let mut patch = format!(
+        "diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n",
+        p = doc.path
+    );
+    let mut used = false;
+    for hunk in &doc.hunks {
+        if hunk.start > high || hunk.end <= low {
+            continue;
+        }
+        let mut changed = false;
+        let mut body = String::new();
+        for (index, line) in doc.lines.iter().enumerate().take(hunk.end).skip(hunk.start) {
+            let chosen = (low..=high).contains(&index);
+            let marker = match line.kind {
+                LineKind::Header | LineKind::Hunk => continue,
+                LineKind::Context => ' ',
+                LineKind::Add => {
+                    if chosen {
+                        changed = true;
+                        '+'
+                    } else {
+                        continue;
+                    }
+                }
+                LineKind::Remove => {
+                    if chosen {
+                        changed = true;
+                        '-'
+                    } else {
+                        ' '
+                    }
+                }
+            };
+            body.push(marker);
+            body.push_str(&line.text);
+            body.push('\n');
+        }
+        if !changed || body.is_empty() {
+            continue;
+        }
+        let (old_start, new_start) = hunk_numbers(&hunk.header);
+        patch.push_str(&format!("@@ -{},0 +{},0 @@\n", old_start, new_start));
+        patch.push_str(&body);
+        used = true;
+    }
+    if used {
+        Some(patch)
+    } else {
+        None
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> DiffDoc {
+        parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+three\n end\n",
+            "a.txt",
+        )
+    }
+
+    #[test]
+    fn selection_keeps_only_chosen_lines() {
+        let doc = sample();
+        let remove_index = doc
+            .lines
+            .iter()
+            .position(|line| line.kind == LineKind::Remove)
+            .unwrap();
+        let patch = patch_for_selection(&doc, remove_index, remove_index + 1).unwrap();
+        assert!(patch.contains("+three"));
+        assert!(patch.contains("-two"));
+        assert_eq!(patch.lines().filter(|line| line.starts_with("@@")).count(), 1);
+    }
+
 }

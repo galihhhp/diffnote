@@ -3,6 +3,7 @@ mod comments;
 mod config;
 mod diff;
 mod git;
+mod highlight;
 mod scripts;
 mod transport;
 mod ui;

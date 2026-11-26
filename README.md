@@ -49,9 +49,10 @@ Run `?` inside diffnote for the full list. Defaults:
 | --- | --- |
 | Navigate | `Tab` view, `f`/`F` file, `]`/`[` hunk, `o` jump to file, `/` search, `n`/`N` match, `h`/`l`/`0` pan split view |
 | Review | `c` comment, `m` edit note, `1` focus notes, `R` resend, `s` send, `S` target |
-| Git | `g` opens the git command menu, `ga` stage, `gA` stage all, `gu` unstage, `gU` unstage all, `gh` stage hunk, `gc` commit, `gr` refresh, `gs` update branch, `gb` new branch, `gB` choose base, `gn` rename, `gl` pull, `gp` push, `gP` force-with-lease push |
+| Git | `g` opens the git command menu, `ga` stage, `gA` stage all, `gu` unstage, `gU` unstage all, `gh` stage hunk, `gc` commit, `gr` refresh, `gs` update branch, `gb` new branch, `gB` choose base, `gn` rename, `gl` pull, `gp` push, `gP` force-with-lease push, `gz` stash push (asks for a title), `gZ` stash pop (pick from a list) |
 | View | `v` split, `b` comments, `L` commit log, `J`/`K` scroll log diff |
 | Tools | `t` new agent tab, `e` editor tab, `E` editor float, `?` help |
+| Select | `V` select lines, then `A` stage selection or `c` range comment |
 
 Multiline input: `C-j` or `Shift+Enter` for a newline, `Enter` to commit, `C-u` to clear. Pasting multiline text works too.
 
@@ -95,7 +96,7 @@ cline = 'cline "Please address the review comments in {file}"'
 | `split`, `show_comments` | Default pane visibility; toggled with `v` and `b` |
 | `base_branch` | Branch to compare against; header shows ahead/behind and "up to date"; `p` changes it for the session from a list of local branches |
 | `rename_branch`, `push` | Key bindings for `C` (rename current branch) and `P` (`git push -u origin HEAD`), both confirmed before running |
-| `update_command`, `branchup_command` | Shell commands run with `U` / `B`; `{base}` and `{branch}` expand before running |
+| `update_command`, `branchup_command` | Shell commands run with `gs` / `gb`; `{base}` and `{branch}` expand before running |
 
 All git command keys start with `g` (like `gc` for commit). Press `g` to open the menu, then the second key. `gB` opens a list of local branches to pick the base for this session; the header and `gs`/`gb` update immediately. `gn` prompts for a new name and renames the current local branch. `gl` runs `git pull`, `gp` runs `git push -u origin HEAD`, and `gP` runs `git push -u origin HEAD --force-with-lease`. All of them ask for confirmation first. `gP` uses a red warning because it can rewrite remote history. Every git command shows a loading overlay while it runs, then the command output. `gp` and `gP` refuse to run on a detached HEAD.
 
@@ -104,6 +105,14 @@ All git command keys start with `g` (like `gc` for commit). Press `g` to open th
 The bundled scripts stash uncommitted changes, pull the base branch, and rebase/create a branch. They mutate the worktree; review `scripts/git_update.sh` and `scripts/branchup.sh` before using them. If the base branch does not exist locally, the header says so.
 
 Unknown keys are ignored. Duplicate key bindings produce a warning in the status line.
+
+## Line selection and range comments
+
+`V` starts visual line selection and jumps to the nearest `+`/`-` line, so a single `V` already selects a real change. `j`/`k` extend it, `A` stages just the selected lines via `git apply --cached --recount`, and `c` opens a comment covering the whole range. Range comments show as `start-end` in the notes panel and include the selected code in the payload sent to your agent. `Esc` cancels.
+
+## Bottom panel
+
+The bottom row is split in two: comments take 70% on the left, the stash list 30% on the right (`Stash (n)` shows how many you have). `p` focuses the comments panel; `gz` asks for a title and stashes the working tree including untracked files; `gZ` opens a picker listing every stash so you choose which one to pop.
 
 ## Local state
 

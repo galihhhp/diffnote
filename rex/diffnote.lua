@@ -156,19 +156,7 @@ function M.toggle(ctx)
   local fg = foreground(session_id, block_id)
   local cwd = fg.cwd or ""
   if cwd == "" then cwd = os.getenv("HOME") or "." end
-  local repo = repo_root(cwd)
-  if not repo then
-    for _, b in ipairs(blocks) do
-      if b.block_id ~= block_id then
-        local other = foreground(session_id, b.block_id)
-        if other.cwd and other.cwd ~= "" then
-          repo = repo_root(other.cwd)
-          if repo then break end
-        end
-      end
-    end
-  end
-  if not repo then repo = cwd end
+  local repo = repo_root(cwd) or cwd
   local label = LABEL .. ":" .. tostring(block_id)
   for _, b in ipairs(blocks) do
     if b.label == label then

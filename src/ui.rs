@@ -46,6 +46,9 @@ fn mode_accent(mode: &Mode) -> Color {
         Mode::BasePicker => Color::LightBlue,
         Mode::RenameInput => Color::LightYellow,
         Mode::Loading => Color::LightGreen,
+        Mode::Visual => Color::LightYellow,
+        Mode::StashPicker => Color::LightBlue,
+        Mode::StashTitle => Color::LightCyan,
         Mode::Normal => Color::Gray,
     }
 }
@@ -102,8 +105,7 @@ fn footer_hint<'a>(keys: &[(&str, &str)], accent: Color) -> Line<'a> {
         spans.push(Span::styled(
             format!(" {} ", key),
             Style::default()
-                .fg(Color::Black)
-                .bg(accent)
+                .fg(accent)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
@@ -118,6 +120,7 @@ fn section_color(section: Section) -> Color {
         Section::Staged => Color::Green,
         Section::Unstaged => Color::Yellow,
         Section::Untracked => Color::Cyan,
+        Section::Review => Color::LightMagenta,
     }
 }
 
@@ -138,7 +141,56 @@ fn status_color(status: &str) -> Color {
     Color::Gray
 }
 
+const SELECT_BG: Color = Color::Rgb(38, 50, 68);
+
+fn selected_range(app: &App, index: usize) -> bool {
+    if app.mode != Mode::Visual {
+        return false;
+    }
+    app.visual_anchor
+        .map(|anchor| (anchor.min(app.cursor)..=anchor.max(app.cursor)).contains(&index))
+        .unwrap_or(false)
+}
+
+fn prefix_style(kind: LineKind) -> Style {
+    match kind {
+        LineKind::Add => Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD),
+        LineKind::Remove => Style::default()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD),
+        LineKind::Hunk => Style::default().fg(Color::Cyan),
+        LineKind::Header => Style::default().fg(Color::DarkGray),
+        LineKind::Context => Style::default().fg(Color::DarkGray),
+    }
+}
+
+fn text_spans(
+    app: &App,
+    key: &str,
+    index: usize,
+    text: &str,
+    style: Style,
+    kind: LineKind,
+) -> Vec<Span<'static>> {
+    if kind == LineKind::Context {
+        if let Some(tokens) = app.tokens.get(key).and_then(|lines| lines.get(index)) {
+            if !tokens.is_empty() {
+                return tokens
+                    .iter()
+                    .map(|(chunk, color)| Span::styled(chunk.clone(), style.fg(*color)))
+                    .collect();
+            }
+        }
+    }
+    vec![Span::styled(text.to_string(), style)]
+}
+
 fn split_cell_line(
+    app: &App,
+    key: &str,
+    doc_index: usize,
     cell: Option<&SplitCell>,
     highlight: bool,
     mark_count: usize,
@@ -146,12 +198,19 @@ fn split_cell_line(
     let Some(cell) = cell else {
         return Line::from(Span::styled("~", Style::default().fg(Color::DarkGray)));
     };
-    let (prefix, color) = match cell.kind {
-        LineKind::Header => ("  ", Color::DarkGray),
-        LineKind::Hunk => ("", Color::Cyan),
-        LineKind::Context => ("  ", Color::Gray),
-        LineKind::Add => ("+ ", Color::Green),
-        LineKind::Remove => ("- ", Color::Red),
+    let prefix = match cell.kind {
+        LineKind::Header => "  ",
+        LineKind::Hunk => "",
+        LineKind::Context => "  ",
+        LineKind::Add => "+ ",
+        LineKind::Remove => "- ",
+    };
+    let color = match cell.kind {
+        LineKind::Header => Color::DarkGray,
+        LineKind::Hunk => Color::Cyan,
+        LineKind::Context => Color::Gray,
+        LineKind::Add => Color::LightGreen,
+        LineKind::Remove => Color::LightRed,
     };
     let number = cell
         .number
@@ -171,27 +230,49 @@ fn split_cell_line(
     };
     let badge_style = if mark_count > 0 {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::LightYellow)
+            .fg(Color::LightYellow)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
     let mut style = Style::default().fg(color);
     if mark_count > 0 {
-        style = style.bg(Color::Rgb(58, 38, 8));
+        style = style.fg(Color::LightYellow).add_modifier(Modifier::BOLD);
+    }
+    if selected_range(app, doc_index) {
+        style = style.bg(SELECT_BG).add_modifier(Modifier::BOLD);
     }
     if highlight {
-        style = style.bg(Color::DarkGray);
+        style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     }
-    Line::from(vec![
+    let mut number_style = Style::default().fg(match cell.kind {
+        LineKind::Add => Color::Green,
+        LineKind::Remove => Color::Red,
+        _ => Color::DarkGray,
+    });
+    if highlight || selected_range(app, doc_index) {
+        number_style = number_style.add_modifier(Modifier::BOLD);
+    }
+    if selected_range(app, doc_index) {
+        number_style = number_style.bg(SELECT_BG);
+    }
+    let mut prefix_span_style = prefix_style(cell.kind);
+    if highlight {
+        prefix_span_style = prefix_span_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    }
+    if selected_range(app, doc_index) {
+        prefix_span_style = prefix_span_style.bg(SELECT_BG).add_modifier(Modifier::BOLD);
+    }
+    let mut spans = vec![
         Span::styled(badge, badge_style),
-        Span::styled(number, Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{}{}", prefix, cell.text), style),
-    ])
+        Span::styled(number, number_style),
+        Span::styled(prefix.to_string(), prefix_span_style),
+    ];
+    spans.extend(text_spans(app, key, doc_index, &cell.text, style, cell.kind));
+    Line::from(spans)
 }
 
-fn split_panes(app: &App, doc: &DiffDoc, rows: &[SplitRow]) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+fn split_panes(app: &App, doc: &DiffDoc, rows: &[SplitRow], key: &str) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let mut left = Vec::new();
     let mut right = Vec::new();
     for row in rows {
@@ -202,26 +283,36 @@ fn split_panes(app: &App, doc: &DiffDoc, rows: &[SplitRow]) -> (Vec<Line<'static
             .or(row.right.as_ref())
             .and_then(|cell| cell.number)
             .unwrap_or(0);
-        let mark_count = app.comments.for_line(&doc.path, number).len();
-        left.push(split_cell_line(row.left.as_ref(), highlight, mark_count));
-        right.push(split_cell_line(row.right.as_ref(), highlight, mark_count));
+        let mark_count = app
+            .comments
+            .for_line(&doc.path, number)
+            .len();
+        left.push(split_cell_line(app, key, row.doc_index, row.left.as_ref(), highlight, mark_count));
+        right.push(split_cell_line(app, key, row.doc_index, row.right.as_ref(), highlight, mark_count));
     }
     (left, right)
 }
 
-fn diff_lines(app: &App, doc: &DiffDoc) -> Vec<Line<'static>> {
+fn diff_lines(app: &App, doc: &DiffDoc, key: &str) -> Vec<Line<'static>> {
     let hits: std::collections::HashSet<usize> =
         app.search_hits.iter().copied().collect();
     doc.lines
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let (prefix, color) = match line.kind {
-                LineKind::Header => ("  ", Color::DarkGray),
-                LineKind::Hunk => ("", Color::Cyan),
-                LineKind::Context => ("  ", Color::Gray),
-                LineKind::Add => ("+ ", Color::Green),
-                LineKind::Remove => ("- ", Color::Red),
+            let prefix = match line.kind {
+                LineKind::Header => "  ",
+                LineKind::Hunk => "",
+                LineKind::Context => "  ",
+                LineKind::Add => "+ ",
+                LineKind::Remove => "- ",
+            };
+            let color = match line.kind {
+                LineKind::Header => Color::DarkGray,
+                LineKind::Hunk => Color::Cyan,
+                LineKind::Context => Color::Gray,
+                LineKind::Add => Color::LightGreen,
+                LineKind::Remove => Color::LightRed,
             };
             let number = line
                 .new_no
@@ -246,27 +337,44 @@ fn diff_lines(app: &App, doc: &DiffDoc) -> Vec<Line<'static>> {
             };
             let badge_style = if mark_count > 0 {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightYellow)
+                    .fg(Color::LightYellow)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
             let mut style = Style::default().fg(color);
             if mark_count > 0 {
-                style = style.bg(Color::Rgb(58, 38, 8));
+                style = style.fg(Color::LightYellow).add_modifier(Modifier::BOLD);
             }
             if hits.contains(&index) {
-                style = style.bg(Color::Rgb(70, 55, 20));
+                style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
             }
+            let mut number_style = Style::default().fg(match line.kind {
+                LineKind::Add => Color::Green,
+                LineKind::Remove => Color::Red,
+                _ => Color::DarkGray,
+            });
+            let mut prefix_span_style = prefix_style(line.kind);
             if index == app.cursor {
-                style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+                style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+                number_style = Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD);
+                prefix_span_style = prefix_style(line.kind)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
             }
-            Line::from(vec![
+            if selected_range(app, index) {
+                style = style.bg(SELECT_BG).add_modifier(Modifier::BOLD);
+                number_style = number_style.bg(SELECT_BG);
+                prefix_span_style = prefix_span_style.bg(SELECT_BG);
+            }
+            let mut spans = vec![
                 Span::styled(badge, badge_style),
-                Span::styled(number, Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{}{}", prefix, line.text), style),
-            ])
+                Span::styled(number, number_style),
+                Span::styled(prefix.to_string(), prefix_span_style),
+            ];
+            spans.extend(text_spans(app, key, index, &line.text, style, line.kind));
+            Line::from(spans)
         })
         .collect()
 }
@@ -333,6 +441,7 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
             Section::Staged => staged += 1,
             Section::Unstaged => unstaged += 1,
             Section::Untracked => untracked += 1,
+            Section::Review => {}
         }
     }
     let title = format!("Files  +{} ~{} ?{}", staged, unstaged, untracked);
@@ -340,8 +449,8 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         );
     let mut state = ListState::default();
     state.select(Some(app.selected));
@@ -368,10 +477,16 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
         });
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let offset = app.cursor.saturating_sub(inner.height as usize / 2) as u16;
+    let key = app.current_file().map(crate::app::doc_key).unwrap_or_default();
+    let mut offset = app.cursor.saturating_sub(inner.height as usize / 2) as u16;
     if app.split {
         let rows = crate::diff::split_rows(doc);
-        let (left_lines, right_lines) = split_panes(app, doc, &rows);
+        let row_cursor = rows
+            .iter()
+            .position(|row| row.doc_index >= app.cursor)
+            .unwrap_or(rows.len().saturating_sub(1));
+        offset = row_cursor.saturating_sub(inner.height as usize / 2) as u16;
+        let (left_lines, right_lines) = split_panes(app, doc, &rows, &key);
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -383,21 +498,73 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
             columns[0],
         );
         frame.render_widget(
-            Paragraph::new(left_lines)
-                .scroll((offset, app.h_scroll)),
+            Paragraph::new(left_lines).scroll((offset, app.h_scroll)),
             columns[0],
         );
         frame.render_widget(
-            Paragraph::new(right_lines)
-                .scroll((offset, app.h_scroll)),
+            Paragraph::new(right_lines).scroll((offset, app.h_scroll)),
             columns[1],
         );
     } else {
         frame.render_widget(
-            Paragraph::new(diff_lines(app, doc)).scroll((offset, 0)),
+            Paragraph::new(diff_lines(app, doc, &key)).scroll((offset, 0)),
             inner,
         );
     }
+}
+
+
+fn draw_stashes(frame: &mut Frame, app: &App, area: Rect) {
+    let focused = app.mode == Mode::StashPicker;
+    let lines: Vec<Line<'static>> = if app.stashes.is_empty() {
+        vec![Line::from(Span::styled(
+            "no stashes",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        app.stashes
+            .iter()
+            .enumerate()
+            .map(|(index, (reference, message))| {
+                let selected = focused && index == app.stash_pick;
+                let marker = if selected { "▸" } else { " " };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                Line::from(vec![
+                    Span::styled(
+                        marker,
+                        if selected {
+                            Style::default().fg(Color::LightBlue)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("{} ", reference.trim_start_matches("stash@")),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(message.clone(), style),
+                ])
+            })
+            .collect()
+    };
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if focused {
+                Color::LightBlue
+            } else {
+                Color::DarkGray
+            }))
+            .title(format!("Stash ({})", app.stashes.len())),
+    );
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_comments(frame: &mut Frame, app: &App, area: Rect) {
@@ -420,8 +587,7 @@ fn draw_comments(frame: &mut Frame, app: &App, area: Rect) {
             let style = if selected {
                 Style::default()
                     .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 Style::default().fg(Color::Gray)
             };
@@ -440,7 +606,7 @@ fn draw_comments(frame: &mut Frame, app: &App, area: Rect) {
                         "[{}] {}:{}-{} {}",
                         state,
                         comment.path,
-                        comment.line_no,
+                        comment.label(),
                         comment.side.tag(),
                         comment.text
                     ),
@@ -476,8 +642,7 @@ fn group_spans<'a>(
         Span::styled(
             format!(" {} ", label),
             Style::default()
-                .fg(Color::Black)
-                .bg(color)
+                .fg(color)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -511,15 +676,14 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     ];
     let review = vec![
         (c.key("comment"), "note"),
+        (c.key("visual_select"), "select"),
+        (c.key("stage_selection"), "stage"),
         (c.key("edit_comment"), "edit"),
         (c.key("focus_comments"), "notes"),
         (c.key("resend_comments"), "resend"),
     ];
     let git_ops = vec![
-        ("g", "git cmds"),
-        (c.key("commit"), "commit"),
-        (c.key("push"), "push"),
-        (c.key("pull"), "pull"),
+        ("g", "git menu"),
         (c.key("refresh"), "refresh"),
     ];
     let agent = vec![
@@ -531,6 +695,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     ];
     let view = vec![
         (c.key("toggle_split"), "split"),
+        (c.key("toggle_whole_file"), "whole"),
         (c.key("toggle_comments"), "comments"),
         (c.key("history"), "log"),
         (c.key("help"), "help"),
@@ -539,10 +704,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let mut row1 = group_spans("NAV", Color::Cyan, &nav);
     row1.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
     row1.extend(group_spans("REVIEW", Color::LightYellow, &review));
+    row1.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
+    row1.extend(group_spans("VIEW", Color::Magenta, &view));
     let mut row2 = group_spans("GIT", Color::Green, &git_ops);
     row2.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
     row2.extend(group_spans("AGENT", Color::LightBlue, &agent));
-    let row3 = group_spans("VIEW", Color::Magenta, &view);
     let detail = Line::from(vec![
         Span::styled(" mode ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{:?}", app.mode), Style::default().fg(Color::White)),
@@ -559,7 +725,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let footer = Paragraph::new(vec![
         Line::from(row1),
         Line::from(row2),
-        Line::from(row3),
         detail,
     ])
     .block(
@@ -604,8 +769,8 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         ),
         Mode::Help => (
             " Keys ",
-            62,
-            (app.config.keys.len() as u16 + 5).min(30),
+            84,
+            (app.config.keys.len().div_ceil(2) as u16 + 6).min(34),
             vec![("?", "close")],
         ),
         Mode::FilePicker => (
@@ -617,7 +782,14 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         Mode::PendingG => (
             " Git commands ",
             58,
-            18,
+            (app
+                .config
+                .keys
+                .values()
+                .filter(|key| key.starts_with('g') && key.len() > 1)
+                .count() as u16
+                + 6)
+                .min(30),
             vec![("Esc", "cancel")],
         ),
         Mode::History => (
@@ -662,6 +834,19 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             8,
             vec![("Esc", "wait")],
         ),
+        Mode::StashPicker => (
+            " Pop which stash ",
+            76,
+            (app.stashes.len() as u16 + 7).min(24),
+            vec![("j/k", "move"), ("Enter", "pop"), ("Esc", "cancel")],
+        ),
+        Mode::StashTitle => (
+            " Stash title ",
+            64,
+            9,
+            vec![("Enter", "stash"), ("Esc", "cancel")],
+        ),
+        Mode::Visual => return,
         Mode::CommentPanel => return,
         Mode::Normal => return,
         };
@@ -683,12 +868,62 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
                 .fg(accent)
                 .add_modifier(Modifier::BOLD),
         )))
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let field_width = inner.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     match app.mode {
+        Mode::Visual => return,
+        Mode::StashTitle => {
+            lines.push(Line::from(Span::styled(
+                "Stash the working tree (including untracked) under this title.",
+                Style::default().fg(Color::Gray),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("> ", Style::default().fg(accent)),
+                Span::raw(app.input.clone()),
+                Span::styled("▏", Style::default().fg(accent)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                if app.input.trim().is_empty() {
+                    "empty title uses \"diffnote stash\""
+                } else {
+                    ""
+                },
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        Mode::StashPicker => {
+            lines.push(Line::from(Span::styled(
+                "Choose a stash to pop into the working tree.",
+                Style::default().fg(Color::Gray),
+            )));
+            lines.push(Line::from(""));
+            for (index, (reference, message)) in app.stashes.iter().enumerate() {
+                let selected = index == app.stash_pick;
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if selected { "▸ " } else { "  " },
+                        Style::default().fg(if selected { accent } else { Color::DarkGray }),
+                    ),
+                    Span::styled(
+                        format!("{:<10}", reference),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        message.clone(),
+                        if selected {
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        },
+                    ),
+                ]));
+            }
+        }
         Mode::CommentInput | Mode::CommitInput => {
             let label = if app.mode == Mode::CommentInput {
                 if app.editing_id.is_some() {
@@ -791,20 +1026,28 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         Mode::Help => {
             let mut entries: Vec<(&String, &String)> = app.config.keys.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
-            for (action, key) in entries {
-                lines.push(Line::from(vec![
-                    Span::styled(
+            let half = entries.len().div_ceil(2);
+            for row in 0..half {
+                let mut spans = Vec::new();
+                for column in 0..2 {
+                    let Some((action, key)) = entries.get(row + column * half) else {
+                        continue;
+                    };
+                    if column > 0 {
+                        spans.push(Span::raw("   "));
+                    }
+                    spans.push(Span::styled(
                         format!(" {:>8} ", key),
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(accent)
+                            .fg(accent)
                             .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("  {}", action),
+                    ));
+                    spans.push(Span::styled(
+                        format!("  {:<22}", action),
                         Style::default().fg(Color::Gray),
-                    ),
-                ]));
+                    ));
+                }
+                lines.push(Line::from(spans));
             }
             lines.push(Line::from(""));
         }
@@ -871,11 +1114,11 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
                 .map(|(action, key)| (key.clone(), action.clone()))
                 .collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
-            for (key, action) in entries.iter().take(13) {
+            for (key, action) in entries.iter() {
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(" {} ", key),
-                        Style::default().fg(Color::Black).bg(accent),
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" "),
                     Span::styled(action.clone(), Style::default().fg(Color::Gray)),
@@ -1119,42 +1362,75 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(2),
             Constraint::Min(4),
-            Constraint::Length(5),
+            Constraint::Length(4),
         ])
         .split(area);
     let view = match app.view {
         View::Review => "Review",
         View::Git => "Git",
     };
-    let paired = match &app.target {
-        Some(target) => format!("-> {}", target.label()),
-        None => "no agent".to_string(),
-    };
-    let branch = if app.branch_state.current.is_empty() {
-        "detached".to_string()
+    let sep = || Span::styled("  ›  ", Style::default().fg(Color::DarkGray));
+    let project = app
+        .repo
+        .file_name()
+        .and_then(|name| name.to_str()).unwrap_or("diffnote").to_string();
+    let mut header_spans = vec![
+        Span::styled(
+            format!(" {} ", project),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        sep(),
+        Span::styled(
+            app.snapshot.head.clone(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        sep(),
+    ];
+    if app.branch_state.current.is_empty() {
+        header_spans.push(Span::styled(
+            "detached",
+            Style::default().fg(Color::Red),
+        ));
     } else {
-        let status = if !app.branch_state.base_exists {
-            format!("base {} missing", app.branch_state.base)
+        let (text, color) = if !app.branch_state.base_exists {
+            (
+                format!("{} ⚠ {} missing", app.branch_state.current, app.branch_state.base),
+                Color::Yellow,
+            )
         } else if app.branch_state.updated {
-            format!("up to date with {}", app.branch_state.base)
+            (
+                format!("{} ✓ up to date", app.branch_state.current),
+                Color::Green,
+            )
         } else {
-            format!(
-                "behind {} by {} (+{} ahead)",
-                app.branch_state.base, app.branch_state.behind, app.branch_state.ahead
+            (
+                format!(
+                    "{} ↓{} ↑{}",
+                    app.branch_state.current, app.branch_state.behind, app.branch_state.ahead
+                ),
+                Color::Yellow,
             )
         };
-        format!("{} · {}", app.branch_state.current, status)
+        header_spans.push(Span::styled(text, Style::default().fg(color)));
+    }
+    header_spans.push(sep());
+    header_spans.push(Span::styled(view, Style::default().fg(Color::Cyan)));
+    header_spans.push(sep());
+    header_spans.push(Span::styled(
+        format!("base {}", app.config.base_branch),
+        Style::default().fg(Color::Gray),
+    ));
+    header_spans.push(sep());
+    let paired = match &app.target {
+        Some(target) => format!("→ {}", target.short_label()),
+        None => "no agent".to_string(),
     };
+    header_spans.push(Span::styled(
+        paired,
+        Style::default().fg(Color::LightBlue),
+    ));
     let header = Paragraph::new(vec![
-        Line::from(format!(
-            "diffnote | {} | {} | {} | {} | {} | base:{}",
-            app.repo.display(),
-            app.snapshot.head,
-            branch,
-            view,
-            paired,
-            app.config.base_branch
-        )),
+        Line::from(header_spans),
         Line::from(app.status.clone()),
     ])
     .block(Block::default().borders(Borders::BOTTOM));
@@ -1164,7 +1440,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(6), Constraint::Length(9)])
             .split(chunks[1]);
-        draw_comments(frame, app, rows[1]);
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(rows[1]);
+        draw_comments(frame, app, columns[0]);
+        draw_stashes(frame, app, columns[1]);
         rows[0]
     } else {
         chunks[1]

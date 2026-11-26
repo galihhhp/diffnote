@@ -54,18 +54,17 @@ pub enum Target {
 }
 
 impl Target {
-    pub fn label(&self) -> String {
+    pub fn short_label(&self) -> String {
         match self {
-            Target::Rex { block, .. } => {
-                let end = block.len().min(18);
-                format!("rex {}", &block[..end])
-            }
+            Target::Rex { .. } => "rex".to_string(),
             Target::Tmux { pane } => format!("tmux {}", pane),
             Target::NewTab => "new tab".to_string(),
-            Target::Inbox => ".diffnote/inbox".to_string(),
+            Target::Inbox => "inbox".to_string(),
             Target::Clipboard => "clipboard".to_string(),
         }
     }
+
+
 }
 
 #[derive(Clone, Debug)]

@@ -1,7 +1,8 @@
-use crate::comments::{CommentStore, Side};
+use crate::comments::{CommentStore, Draft, Side};
 use crate::config::{Config, SendMode};
 use crate::diff::{DiffDoc, LineKind};
 use crate::git::{self, FileEntry, Section, Snapshot};
+use crate::highlight::Token;
 use crate::transport::{self, Candidate, Target};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -32,9 +33,12 @@ pub enum Mode {
     BasePicker,
     RenameInput,
     Loading,
+    StashPicker,
+    StashTitle,
+    Visual,
 }
 
-type PendingComment = (String, Section, Side, usize, String, String);
+type PendingComment = Draft;
 
 pub enum PendingCommand {
     Shell { title: String, command: String },
@@ -44,6 +48,9 @@ pub enum PendingCommand {
     StageAll,
     UnstageAll,
     Refresh,
+    ApplySelection { start: usize, end: usize },
+    StashPush { title: String },
+    StashPop { reference: String },
 }
 
 fn subsequence(query: &str, text: &str) -> bool {
@@ -101,6 +108,11 @@ pub struct App {
     pub pending_command: Option<PendingCommand>,
     pub loading_label: String,
     pub outside_repo: bool,
+    pub visual_anchor: Option<usize>,
+    pub tokens: HashMap<String, Vec<Vec<Token>>>,
+    pub whole_file: bool,
+    pub stashes: Vec<(String, String)>,
+    pub stash_pick: usize,
 }
 
 pub fn doc_key(entry: &FileEntry) -> String {
@@ -192,6 +204,11 @@ impl App {
             pending_command: None,
             loading_label: String::new(),
             outside_repo: false,
+            visual_anchor: None,
+            tokens: HashMap::new(),
+            whole_file: false,
+            stashes: Vec::new(),
+            stash_pick: 0,
         };
         app.refresh()?;
         app.candidates = transport::candidates(
@@ -240,15 +257,26 @@ impl App {
         self.snapshot = git::snapshot(&self.repo)?;
         self.docs.clear();
         self.hashes.clear();
-        for entry in &self.snapshot.files {
+        self.tokens.clear();
+        let entries = self.snapshot.files.clone();
+        for entry in &entries {
             let key = doc_key(entry);
-            let raw = git::diff_text(&self.repo, &entry.path, entry.section).unwrap_or_default();
-            self.docs
-                .insert(key.clone(), crate::diff::parse(&raw, &entry.path));
+            let context = if self.whole_file { 100_000 } else { 3 };
+            let raw = git::diff_text(&self.repo, &entry.path, entry.section, context)
+                .unwrap_or_default();
+            let doc = crate::diff::parse(&raw, &entry.path);
+            let lines: Vec<String> = doc.lines.iter().map(|line| line.text.clone()).collect();
+            self.tokens
+                .insert(key.clone(), crate::highlight::highlight(&entry.path, &lines));
+            self.docs.insert(key.clone(), doc);
             self.hashes.insert(
                 key,
                 git::content_hash(&self.repo, &entry.path, entry.section),
             );
+        }
+        self.stashes = git::stash_list(&self.repo);
+        if self.stash_pick >= self.stashes.len() {
+            self.stash_pick = self.stashes.len().saturating_sub(1);
         }
         self.comments.reanchor(&self.docs, &self.hashes);
         let _ = self.comments.save(&self.repo);
@@ -306,6 +334,9 @@ impl App {
             Mode::BranchInput => self.handle_branch_input(&pressed, key),
             Mode::BasePicker => self.handle_base_picker(&pressed),
             Mode::RenameInput => self.handle_rename_input(&pressed, key),
+            Mode::StashPicker => self.handle_stash_picker(&pressed),
+            Mode::StashTitle => self.handle_stash_title(&pressed),
+            Mode::Visual => self.handle_visual(&pressed),
             Mode::Loading => {}
         }
     }
@@ -440,6 +471,22 @@ impl App {
                 self.report(Ok::<(), anyhow::Error>(()), "refreshed");
                 self.mode = Mode::Normal;
             }
+            PendingCommand::StashPush { title } => {
+                self.report(git::stash_push(&self.repo, &title), "stashed");
+                self.mode = Mode::Normal;
+            }
+            PendingCommand::StashPop { reference } => {
+                self.report(
+                    git::stash_pop(&self.repo, &reference),
+                    &format!("popped {}", reference),
+                );
+                self.mode = Mode::Normal;
+            }
+            PendingCommand::ApplySelection { start, end } => {
+                self.apply_selection(start, end);
+                self.visual_anchor = None;
+                self.mode = Mode::Normal;
+            }
         }
     }
 
@@ -520,6 +567,25 @@ impl App {
             "prev_match" => self.cycle_match(-1),
             "open_editor_tab" => self.open_editor(transport::EditorPlacement::Tab),
             "open_editor_float" => self.open_editor(transport::EditorPlacement::Float),
+            "visual_select" => self.start_visual(),
+            "toggle_whole_file" => {
+                self.whole_file = !self.whole_file;
+                let state = if self.whole_file { "on" } else { "off" };
+                let _ = self.refresh();
+                self.status = format!("whole file: {}", state);
+            }
+            "stash_push" => self.open_stash_title(),
+            "stash_pop" => self.open_stash_picker(),
+            "stage_selection" => {
+                if let Some(anchor) = self.visual_anchor {
+                    self.queue(
+                        PendingCommand::ApplySelection { start: anchor, end: self.cursor },
+                        "staging selected lines",
+                    );
+                } else {
+                    self.status = "press V to select lines first".to_string();
+                }
+            }
             _ => {}
         }
     }
@@ -1057,28 +1123,48 @@ impl App {
         let Some(doc) = self.docs.get(&key) else {
             return;
         };
-        let Some(line) = doc.lines.get(self.cursor) else {
+        let selection = self.visual_anchor.map(|anchor| (anchor, self.cursor));
+        let low = selection.map(|(a, b)| a.min(b)).unwrap_or(self.cursor);
+        let high = selection.map(|(a, b)| a.max(b)).unwrap_or(self.cursor);
+        let is_content = |index: usize| {
+            doc.lines
+                .get(index)
+                .is_some_and(|line| line.kind != LineKind::Header && line.kind != LineKind::Hunk)
+        };
+        let target = (low..=high)
+            .find(|index| is_content(*index))
+            .or_else(|| (0..doc.lines.len()).find(|index| is_content(*index)));
+        let Some(target) = target else {
+            self.status = "this file has no content lines to comment on".to_string();
+            self.visual_anchor = None;
+            self.mode = Mode::Normal;
             return;
         };
-        if line.kind == LineKind::Header || line.kind == LineKind::Hunk {
-            self.status = "move to a content line first".to_string();
-            return;
-        }
+        let line = &doc.lines[target];
         let side = if line.kind == LineKind::Remove {
             Side::Left
         } else {
             Side::Right
         };
         let line_no = line.new_no.or(line.old_no).unwrap_or(0);
-        self.editing_id = None;
-        self.pending_comment = Some((
-            entry.path.clone(),
-            entry.section,
+        let (range_end, mut code) = selection
+            .map(|(anchor, cursor)| self.range_details(doc, anchor, cursor))
+            .unwrap_or((None, vec![line.text.clone()]));
+        if code.is_empty() {
+            code.push(line.text.clone());
+        }
+        self.pending_comment = Some(Draft {
+            path: entry.path.clone(),
+            section: entry.section,
             side,
             line_no,
-            line.text.clone(),
-            self.hashes.get(&key).cloned().unwrap_or_default(),
-        ));
+            end_line: range_end,
+            line_text: line.text.clone(),
+            code,
+            content_hash: self.hashes.get(&key).cloned().unwrap_or_default(),
+        });
+        self.editing_id = None;
+        self.visual_anchor = None;
         self.input.clear();
         self.mode = Mode::CommentInput;
     }
@@ -1094,9 +1180,13 @@ impl App {
             .and_then(|doc| doc.lines.get(self.cursor))
             .and_then(|line| line.new_no.or(line.old_no))
             .unwrap_or(0);
-        self.comments
-            .items
-            .retain(|comment| !(comment.path == entry.path && comment.line_no == line_no));
+        self.comments.items.retain(|comment| {
+            !(comment.path == entry.path
+                && (comment.line_no == line_no
+                    || comment.end_line.is_some_and(|end| {
+                        (comment.line_no.min(end)..=comment.line_no.max(end)).contains(&line_no)
+                    })))
+        });
         let _ = self.comments.save(&self.repo);
         self.status = "comment removed".to_string();
     }
@@ -1392,19 +1482,9 @@ impl App {
                 self.input.clear();
                 return;
             }
-            if let Some((path, section, side, line_no, line_text, hash)) =
-                self.pending_comment.take()
-            {
+            if let Some(draft) = self.pending_comment.take() {
                 if !self.input.trim().is_empty() {
-                    self.comments.add(
-                        path,
-                        section,
-                        side,
-                        line_no,
-                        line_text,
-                        hash,
-                        self.input.trim().to_string(),
-                    );
+                    self.comments.add(draft, self.input.trim().to_string());
                     let _ = self.comments.save(&self.repo);
                     self.status = "comment added".to_string();
                 }
@@ -1491,6 +1571,187 @@ impl App {
                 }
             };
             self.queue(command, label);
+        }
+    }
+
+    fn start_visual(&mut self) {
+        let Some(doc) = self.current_doc() else {
+            self.status = "no diff to select".to_string();
+            return;
+        };
+        let content = |index: usize| {
+            doc.lines
+                .get(index)
+                .is_some_and(|line| !matches!(line.kind, LineKind::Header | LineKind::Hunk))
+        };
+        if !content(self.cursor) {
+            if let Some(index) = (self.cursor..doc.lines.len()).find(|index| content(*index)) {
+                self.cursor = index;
+            }
+        }
+        self.visual_anchor = Some(self.cursor);
+        self.mode = Mode::Visual;
+        self.selection_status();
+    }
+
+    fn range_details(&self, doc: &DiffDoc, anchor: usize, cursor: usize) -> (Option<usize>, Vec<String>) {
+        let low = anchor.min(cursor);
+        let high = anchor.max(cursor);
+        let mut numbers = Vec::new();
+        let mut code = Vec::new();
+        for line in &doc.lines[low..=high.min(doc.lines.len().saturating_sub(1))] {
+            if matches!(line.kind, LineKind::Header | LineKind::Hunk) {
+                continue;
+            }
+            if let Some(number) = line.new_no.or(line.old_no) {
+                numbers.push(number);
+            }
+            code.push(line.text.clone());
+        }
+        let end = numbers.last().copied();
+        (end, code)
+    }
+
+    fn selection_status(&mut self) {
+        let Some(doc) = self.current_doc() else {
+            return;
+        };
+        let Some(anchor) = self.visual_anchor else {
+            return;
+        };
+        let low = anchor.min(self.cursor);
+        let high = anchor.max(self.cursor).min(doc.lines.len().saturating_sub(1));
+        let mut numbers = Vec::new();
+        for line in &doc.lines[low..=high] {
+            if matches!(line.kind, LineKind::Header | LineKind::Hunk) {
+                continue;
+            }
+            if let Some(number) = line.new_no.or(line.old_no) {
+                numbers.push(number);
+            }
+        }
+        let label = match (numbers.first(), numbers.last()) {
+            (Some(first), Some(last)) if first != last => format!("lines {}-{}", first, last),
+            (Some(first), _) => format!("line {}", first),
+            _ => "no changed lines".to_string(),
+        };
+        self.status = format!(
+            "{} selected  ·  j/k extend  ·  A stage  ·  c comment  ·  Esc cancel",
+            label
+        );
+    }
+
+    fn handle_visual(&mut self, pressed: &str) {
+        if pressed == "Esc" || pressed == self.config.key("cancel") || pressed == self.config.key("visual_select") {
+            self.visual_anchor = None;
+            self.mode = Mode::Normal;
+            return;
+        }
+        if pressed == "Up" || pressed == self.config.key("up") {
+            self.move_cursor(-1);
+            self.selection_status();
+            return;
+        }
+        if pressed == "Down" || pressed == self.config.key("down") {
+            self.move_cursor(1);
+            self.selection_status();
+            return;
+        }
+        if pressed == self.config.key("stage_selection") {
+            if let Some(anchor) = self.visual_anchor {
+                let end = self.cursor;
+                self.visual_anchor = None;
+                self.mode = Mode::Normal;
+                self.queue(PendingCommand::ApplySelection { start: anchor, end }, "staging selected lines");
+            }
+            return;
+        }
+        if pressed == self.config.key("comment") {
+            self.open_comment();
+        }
+    }
+
+    fn apply_selection(&mut self, start: usize, end: usize) {
+        if !self.guard() {
+            self.status = "tree changed since render; press gr to refresh".to_string();
+            return;
+        }
+        let Some(entry) = self.current_file().cloned() else {
+            return;
+        };
+        if entry.section != Section::Unstaged {
+            self.status = "line staging works on unstaged changes".to_string();
+            return;
+        }
+        let key = doc_key(&entry);
+        let patch = self
+            .docs
+            .get(&key)
+            .and_then(|doc| crate::diff::patch_for_selection(doc, start, end));
+        let Some(patch) = patch else {
+            self.status = "selection has no changed lines".to_string();
+            return;
+        };
+        self.report(git::stage_patch(&self.repo, &patch, true), "selected lines staged");
+    }
+    fn open_stash_title(&mut self) {
+        self.input.clear();
+        self.mode = Mode::StashTitle;
+        self.status = "stash title: type a message, Enter to stash (Esc cancels)".to_string();
+    }
+
+    fn handle_stash_title(&mut self, pressed: &str) {
+        if pressed == "Esc" || pressed == self.config.key("cancel") {
+            self.mode = Mode::Normal;
+            self.input.clear();
+            return;
+        }
+        if pressed == "Enter" || pressed == self.config.key("confirm") {
+            let title = self.input.trim().to_string();
+            self.input.clear();
+            self.queue(PendingCommand::StashPush { title }, "stashing changes");
+            return;
+        }
+        if pressed == "Backspace" {
+            self.input.pop();
+            return;
+        }
+        let mut characters = pressed.chars();
+        if let (Some(character), None) = (characters.next(), characters.next()) {
+            self.input.push(character);
+        }
+    }
+
+    fn open_stash_picker(&mut self) {
+        self.stashes = git::stash_list(&self.repo);
+        if self.stashes.is_empty() {
+            self.status = "no stashes".to_string();
+            return;
+        }
+        self.stash_pick = 0;
+        self.mode = Mode::StashPicker;
+        self.status = "choose a stash to pop: j/k, Enter, Esc".to_string();
+    }
+
+    fn handle_stash_picker(&mut self, pressed: &str) {
+        if pressed == "Esc" || pressed == self.config.key("cancel") {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if pressed == "Up" || pressed == self.config.key("up") {
+            self.stash_pick = self.stash_pick.saturating_sub(1);
+            return;
+        }
+        if pressed == "Down" || pressed == self.config.key("down") {
+            self.stash_pick = (self.stash_pick + 1).min(self.stashes.len().saturating_sub(1));
+            return;
+        }
+        if pressed == "Enter" || pressed == self.config.key("confirm") {
+            if let Some((reference, _)) = self.stashes.get(self.stash_pick).cloned() {
+                self.queue(PendingCommand::StashPop { reference }, "popping stash");
+            } else {
+                self.mode = Mode::Normal;
+            }
         }
     }
 

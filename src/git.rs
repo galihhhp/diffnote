@@ -10,6 +10,7 @@ pub enum Section {
     Staged,
     Unstaged,
     Untracked,
+    Review,
 }
 
 impl Section {
@@ -18,6 +19,7 @@ impl Section {
             Section::Staged => "staged",
             Section::Unstaged => "unstaged",
             Section::Untracked => "untracked",
+            Section::Review => "review",
         }
     }
 
@@ -26,6 +28,7 @@ impl Section {
             Section::Staged => "Staged",
             Section::Unstaged => "Unstaged",
             Section::Untracked => "Untracked",
+            Section::Review => "Review",
         }
     }
 }
@@ -119,41 +122,6 @@ pub fn snapshot(repo: &Path) -> Result<Snapshot> {
     Ok(Snapshot { files, head })
 }
 
-pub fn diff_text(repo: &Path, path: &str, section: Section) -> Result<String> {
-    match section {
-        Section::Staged => run(
-            repo,
-            &[
-                "diff",
-                "--cached",
-                "--no-ext-diff",
-                "--unified=3",
-                "--",
-                path,
-            ],
-        ),
-        Section::Unstaged => run(
-            repo,
-            &["diff", "--no-ext-diff", "--unified=3", "--", path],
-        ),
-        Section::Untracked => {
-            let content = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
-            let count = content.lines().count().max(1);
-            let mut patch = format!(
-                "diff --git a/{p} b/{p}\nnew file mode 100644\n--- /dev/null\n+++ b/{p}\n@@ -0,0 +1,{n} @@\n",
-                p = path,
-                n = count
-            );
-            for line in content.lines() {
-                patch.push('+');
-                patch.push_str(line);
-                patch.push('\n');
-            }
-            Ok(patch)
-        }
-    }
-}
-
 pub fn content_hash(repo: &Path, path: &str, section: Section) -> String {
     let text = match section {
         Section::Staged => {
@@ -196,9 +164,14 @@ pub fn unstage_file(repo: &Path, path: &str) -> Result<()> {
     run(repo, &["restore", "--staged", "--", path]).map(|_| ())
 }
 
-pub fn stage_hunk(repo: &Path, patch: &str) -> Result<()> {
+pub fn stage_patch(repo: &Path, patch: &str, recount: bool) -> Result<()> {
+    let mut args = vec!["apply", "--cached"];
+    if recount {
+        args.push("--recount");
+    }
+    args.push("-");
     let mut child = Command::new("git")
-        .args(["apply", "--cached", "-"])
+        .args(&args)
         .current_dir(repo)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
@@ -214,6 +187,10 @@ pub fn stage_hunk(repo: &Path, patch: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub fn stage_hunk(repo: &Path, patch: &str) -> Result<()> {
+    stage_patch(repo, patch, false)
 }
 
 pub fn stage_all(repo: &Path) -> Result<()> {
@@ -469,13 +446,71 @@ pub fn commit_diff(repo: &Path, sha: &str) -> Result<String> {
     )
 }
 
+pub fn diff_text(repo: &Path, path: &str, section: Section, context: usize) -> Result<String> {
+    if section == Section::Untracked {
+        let content = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
+        let count = content.lines().count().max(1);
+        let mut patch = format!(
+            "diff --git a/{p} b/{p}\nnew file mode 100644\n--- /dev/null\n+++ b/{p}\n@@ -0,0 +1,{n} @@\n",
+            p = path,
+            n = count
+        );
+        for line in content.lines() {
+            patch.push('+');
+            patch.push_str(line);
+            patch.push('\n');
+        }
+        return Ok(patch);
+    }
+    let mut args: Vec<String> = vec!["diff".to_string()];
+    if section == Section::Staged {
+        args.push("--cached".to_string());
+    }
+    args.push("--no-ext-diff".to_string());
+    args.push(format!("--unified={}", context));
+    args.push("--".to_string());
+    args.push(path.to_string());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run(repo, &refs)
+}
+
+pub fn stash_list(repo: &Path) -> Vec<(String, String)> {
+    let Ok(text) = run(
+        repo,
+        &["stash", "list", "--format=%gd%x1f%gs"],
+    ) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\u{1f}');
+            let reference = parts.next()?.trim().to_string();
+            let message = parts.next().unwrap_or("").trim().to_string();
+            Some((reference, message))
+        })
+        .collect()
+}
+
+pub fn stash_push(repo: &Path, title: &str) -> Result<String> {
+    let message = if title.trim().is_empty() {
+        "diffnote stash".to_string()
+    } else {
+        title.trim().to_string()
+    };
+    run(repo, &["stash", "push", "-u", "-m", &message])
+}
+
+pub fn stash_pop(repo: &Path, reference: &str) -> Result<String> {
+    run(repo, &["stash", "pop", reference])
+}
+
 pub fn commit(repo: &Path, message: &str) -> Result<String> {
     run(repo, &["commit", "-m", message])
 }
 
 #[cfg(test)]
 mod tests {
-    use super::worktree_line;
+    use super::{run, stage_patch, worktree_line};
     use std::path::Path;
     use std::process::Command;
 
@@ -534,6 +569,33 @@ mod tests {
         assert_eq!(worktree_line(&repo, "a.txt", 4), 4);
         assert_eq!(worktree_line(&repo, "a.txt", 5), 6);
         assert_eq!(worktree_line(&repo, "a.txt", 10), 11);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn selection_patch_applies_only_selected_lines() {
+        let repo = std::env::temp_dir().join(format!("dn-sel-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&repo).status().unwrap();
+        }
+        std::fs::write(repo.join("a.txt"), "l1\nl2\nl3\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&repo).status().unwrap();
+        Command::new("git").args(["commit", "-qm", "init"]).current_dir(&repo).status().unwrap();
+        std::fs::write(repo.join("a.txt"), "l1\nNEW-A\nNEW-B\nl2\n").unwrap();
+        let raw = run(&repo, &["diff", "--no-ext-diff", "--unified=3", "--", "a.txt"]).unwrap();
+        let doc = crate::diff::parse(&raw, "a.txt");
+        let remove_index = doc.lines.iter().position(|line| line.kind == crate::diff::LineKind::Remove).unwrap();
+        let add_index = doc.lines.iter().position(|line| line.kind == crate::diff::LineKind::Add).unwrap();
+        let patch = crate::diff::patch_for_selection(&doc, remove_index, add_index).unwrap();
+        stage_patch(&repo, &patch, true).unwrap();
+        let staged = run(&repo, &["show", ":a.txt"]).unwrap();
+        assert!(staged.contains("NEW-A"), "{}", staged);
         let _ = std::fs::remove_dir_all(&repo);
     }
 
