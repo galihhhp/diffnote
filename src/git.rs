@@ -286,6 +286,14 @@ pub fn unstage_file(repo: &Path, path: &str) -> Result<()> {
     run(repo, &["restore", "--staged", "--", path]).map(|_| ())
 }
 
+pub fn discard_file(repo: &Path, path: &str, untracked: bool) -> Result<()> {
+    if untracked {
+        run(repo, &["clean", "-fd", "--", path]).map(|_| ())
+    } else {
+        run(repo, &["restore", "--", path]).map(|_| ())
+    }
+}
+
 pub fn stage_patch(repo: &Path, patch: &str, recount: bool) -> Result<()> {
     let mut args = vec!["apply", "--cached"];
     if recount {
@@ -685,8 +693,8 @@ pub fn commit(repo: &Path, message: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        abort_op, checkout_side, conflict_count, continue_op, current_op, diff_text, run, snapshot,
-        stage_patch, strip_ansi, worktree_line, Op, Section,
+        abort_op, checkout_side, conflict_count, continue_op, current_op, diff_text,
+        discard_file, run, snapshot, stage_patch, strip_ansi, worktree_line, Op, Section,
     };
     use std::path::Path;
     use std::process::Command;
@@ -699,8 +707,23 @@ mod tests {
         assert_eq!(strip_ansi("plain"), "plain");
     }
 
-    fn scratch() -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("dn-map-test-{}", std::process::id()));
+    #[test]
+    fn discard_file_restores_tracked_and_removes_untracked() {
+        let repo = scratch("discard");
+        run(&repo, &["reset", "-q", "--hard"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "rewritten\n").unwrap();
+        std::fs::write(repo.join("fresh.txt"), "new\n").unwrap();
+        discard_file(&repo, "a.txt", false).unwrap();
+        discard_file(&repo, "fresh.txt", true).unwrap();
+        let restored = std::fs::read_to_string(repo.join("a.txt")).unwrap();
+        assert_ne!(restored, "rewritten\n");
+        assert!(!repo.join("fresh.txt").exists());
+        assert!(snapshot(&repo).unwrap().files.is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("dn-map-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         Command::new("git")
@@ -749,7 +772,7 @@ mod tests {
 
     #[test]
     fn maps_staged_line_past_an_insertion() {
-        let repo = scratch();
+        let repo = scratch("map");
         assert_eq!(worktree_line(&repo, "a.txt", 1), 1);
         assert_eq!(worktree_line(&repo, "a.txt", 4), 4);
         assert_eq!(worktree_line(&repo, "a.txt", 5), 6);

@@ -49,7 +49,7 @@ Run `?` inside diffnote for the full list. Defaults:
 | --- | --- |
 | Navigate | `Tab` view, `f`/`F` file, `]`/`[` hunk, `o` jump to file, `/` search, `n`/`N` match, `h`/`l`/`0` pan split view |
 | Review | `c` comment, `m` edit note, `1` focus notes, `R` resend, `s` send, `S` target |
-| Git | `g` opens the git command menu, `ga` stage, `gA` stage all, `gu` unstage, `gU` unstage all, `gh` stage hunk, `gc` commit, `gr` refresh, `gs` update branch, `gb` new branch, `gB` choose base, `gn` rename, `gl` pull, `gp` push, `gP` force-with-lease push, `gz` stash push (asks for a title), `gZ` stash pop (pick from a list) |
+| Git | `g` opens the git command menu, `ga` stage, `gA` stage all, `gu` unstage, `gU` unstage all, `gh` stage hunk, `gd` discard changes to a file (confirmed), `gc` commit, `gr` refresh, `gs` update branch, `gb` new branch, `gB` choose base, `gn` rename, `gl` pull, `gp` push, `gP` force-with-lease push, `gz` stash push (asks for a title), `gZ` stash pop (pick from a list) |
 | Conflicts | `go` keep ours, `gt` keep theirs, `ga` mark resolved, `g]`/`g[` next/prev marker, `gk` continue merge or rebase, `gx` abort it (confirmed) |
 | View | `v` split, `b` comments, `L` commit log, `J`/`K` scroll log diff |
 | Tools | `t` new agent tab, `e` editor tab, `E` editor float, `?` help |

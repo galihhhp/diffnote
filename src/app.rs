@@ -47,6 +47,7 @@ pub enum PendingCommand {
     Rename { name: String },
     StageAll,
     UnstageAll,
+    Discard { path: String, untracked: bool },
     Refresh,
     ApplySelection { start: usize, end: usize },
     StashPush { title: String },
@@ -476,6 +477,15 @@ impl App {
                 }
                 self.mode = Mode::Normal;
             }
+            PendingCommand::Discard { path, untracked } => {
+                if self.guard() {
+                    let label = format!("discarded {}", path);
+                    self.report(git::discard_file(&self.repo, &path, untracked), &label);
+                } else {
+                    self.status = "tree changed since render; press gr to refresh".to_string();
+                }
+                self.mode = Mode::Normal;
+            }
             PendingCommand::Refresh => {
                 self.report(Ok::<(), anyhow::Error>(()), "refreshed");
                 self.mode = Mode::Normal;
@@ -553,6 +563,7 @@ impl App {
             "unstage" => self.unstage(),
             "unstage_all" => self.unstage_all(),
             "stage_hunk" => self.stage(true),
+            "discard" => self.discard(),
             "help" => self.mode = Mode::Help,
             "toggle_split" => self.split = !self.split,
             "scroll_left" => self.h_scroll = self.h_scroll.saturating_sub(4),
@@ -1373,6 +1384,31 @@ impl App {
         self.report(git::unstage_file(&self.repo, &entry.path), "file unstaged");
     }
 
+    fn discard(&mut self) {
+        if !self.guard() {
+            self.status = "tree changed since render; press gr to refresh".to_string();
+            return;
+        }
+        let Some(entry) = self.current_file().cloned() else {
+            return;
+        };
+        let untracked = entry.section == Section::Untracked;
+        if entry.section == Section::Staged {
+            self.status = "file is staged; press gu to unstage it first".to_string();
+            return;
+        }
+        if entry.section == Section::Unmerged {
+            self.status = "resolve the conflict first (ga marks it resolved, gx aborts)".to_string();
+            return;
+        }
+        self.confirm_action = Some(format!("discard:{}:{}", untracked as u8, entry.path));
+        self.mode = Mode::Confirm;
+        self.status = format!(
+            "Discard all changes to {}? Enter confirms, Esc cancels",
+            entry.path
+        );
+    }
+
     fn do_commit(&mut self, message: String) {
         if message.trim().is_empty() {
             self.status = "commit message is empty".to_string();
@@ -1616,6 +1652,15 @@ impl App {
                 _ => {
                     if let Some(name) = action.strip_prefix("rename:") {
                         (PendingCommand::Rename { name: name.to_string() }, "renaming branch")
+                    } else if let Some(rest) = action.strip_prefix("discard:") {
+                        let (flag, path) = rest.split_once(':').unwrap_or(("0", rest));
+                        (
+                            PendingCommand::Discard {
+                                path: path.to_string(),
+                                untracked: flag == "1",
+                            },
+                            "discarding changes",
+                        )
                     } else {
                         return;
                     }

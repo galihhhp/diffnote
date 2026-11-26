@@ -46,6 +46,7 @@ fn default_keys() -> HashMap<String, String> {
         ("unstage", "gu"),
         ("unstage_all", "gU"),
         ("stage_hunk", "gh"),
+        ("discard", "gd"),
         ("commit", "gc"),
         ("help", "?"),
         ("toggle_split", "v"),

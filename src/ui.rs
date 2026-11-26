@@ -801,15 +801,16 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         ),
         Mode::PendingG => (
             " Git commands ",
-            58,
+            72,
             (app
                 .config
                 .keys
                 .values()
                 .filter(|key| key.starts_with('g') && key.len() > 1)
                 .count() as u16
-                + 6)
-                .min(30),
+                / 2
+                + 12)
+                .min(28),
             vec![("Esc", "cancel")],
         ),
         Mode::History => (
@@ -987,6 +988,10 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
                     "Rename the current branch?",
                     "Only the local branch name changes.",
                 ),
+                Some(action) if action.starts_with("discard:") => (
+                    "Throw away every change in this file?",
+                    "Runs git restore, or git clean for an untracked file. The changes cannot be recovered.",
+                ),
                 _ => (
                     "The tree changed since the last render.",
                     "Refresh with r, or commit anyway.",
@@ -994,6 +999,10 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
             };
             let head_color = if app.confirm_action.as_deref() == Some("force_push")
                 || app.confirm_action.as_deref() == Some("abort_op")
+                || app
+                    .confirm_action
+                    .as_deref()
+                    .is_some_and(|action| action.starts_with("discard:"))
             {
                 Color::Red
             } else {
@@ -1139,16 +1148,46 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
                 .filter(|(_, key)| key.starts_with('g') && key.len() > 1)
                 .map(|(action, key)| (key.clone(), action.clone()))
                 .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            for (key, action) in entries.iter() {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!(" {} ", key),
-                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(action.clone(), Style::default().fg(Color::Gray)),
-                ]));
+            entries.sort_by(|a, b| {
+                git_group(&a.1)
+                    .cmp(&git_group(&b.1))
+                    .then(a.0.cmp(&b.0))
+            });
+            let mut groups: Vec<(usize, Vec<(String, String)>)> = Vec::new();
+            for (key, action) in entries {
+                let group = git_group(&action);
+                match groups.last_mut() {
+                    Some((current, items)) if *current == group => items.push((key, action)),
+                    _ => groups.push((group, vec![(key, action)])),
+                }
+            }
+            for (group, items) in groups.iter() {
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", GIT_GROUPS[*group]),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                let half = items.len().div_ceil(2);
+                for row in 0..half {
+                    let mut spans = Vec::new();
+                    for item in [items.get(row), items.get(row + half)] {
+                        match item {
+                            Some((key, action)) => {
+                                spans.push(Span::styled(
+                                    format!(" {:<3}", key),
+                                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                                ));
+                                spans.push(Span::styled(
+                                    format!("{:<17}", action),
+                                    Style::default().fg(Color::Gray),
+                                ));
+                            }
+                            None => spans.push(Span::raw(" ".repeat(20))),
+                        }
+                    }
+                    lines.push(Line::from(spans));
+                }
             }
             lines.push(Line::from(""));
         }
@@ -1501,5 +1540,26 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_footer(frame, app, chunks[2]);
     if app.mode != Mode::Normal && app.mode != Mode::CommentPanel {
         draw_overlay(frame, app);
+    }
+}
+
+const GIT_GROUPS: [&str; 6] = [
+    "Staging",
+    "Commit & branch",
+    "Remote",
+    "Conflicts",
+    "Stash",
+    "Other",
+];
+
+fn git_group(action: &str) -> usize {
+    match action {
+        "stage" | "stage_all" | "unstage" | "unstage_all" | "stage_hunk" | "discard" => 0,
+        "commit" | "branchup" | "rename_branch" | "update_branch" | "pick_base" | "refresh" => 1,
+        "push" | "force_push" | "pull" => 2,
+        "prev_conflict" | "next_conflict" | "take_ours" | "take_theirs" | "continue_op"
+        | "abort_op" => 3,
+        "stash_push" | "stash_pop" => 4,
+        _ => 5,
     }
 }
