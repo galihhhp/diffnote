@@ -165,19 +165,17 @@ fn rex_candidates(_repo: &Path, agents: &[String]) -> Vec<Candidate> {
         if app.is_empty() {
             let foreground = &item["foreground"];
             for name in ["argv0", "name", "invoked_path"] {
-                if let Some(word) = foreground[name].as_str() {
-                    if let Some(agent) = agent_word(word, agents) {
+                if let Some(word) = foreground[name].as_str()
+                    && let Some(agent) = agent_word(word, agents) {
                         app = agent.to_string();
                         break;
                     }
-                }
             }
         }
-        if app.is_empty() {
-            if let Some(pid) = item["foreground"]["pid"].as_u64() {
+        if app.is_empty()
+            && let Some(pid) = item["foreground"]["pid"].as_u64() {
                 app = child_agent(pid, agents).unwrap_or_default();
             }
-        }
         if !agents.iter().any(|agent| agent == &app) {
             continue;
         }
@@ -186,7 +184,7 @@ fn rex_candidates(_repo: &Path, agents: &[String]) -> Vec<Candidate> {
         let title = item["title"].as_str().unwrap_or("");
         let cwd = item["cwd"].as_str().unwrap_or("");
         let suffix = if cwd.is_empty() {
-            format!("{}", &block[..block.len().min(18)])
+            block[..block.len().min(18)].to_string()
         } else {
             cwd.to_string()
         };
@@ -283,7 +281,7 @@ pub fn candidates(
     if adapters.iter().any(|name| name == "tmux") && std::env::var_os("TMUX").is_some() {
         found.extend(tmux_candidates(agents));
     }
-    found.sort_by(|a, b| b.active.cmp(&a.active));
+    found.sort_by_key(|a| std::cmp::Reverse(a.active));
     if std::env::var_os("REX_SESSION").is_some() && which("rex") {
         found.push(Candidate {
             label: format!("New tab: {} with these comments", agent_name),

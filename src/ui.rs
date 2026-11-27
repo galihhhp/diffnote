@@ -181,16 +181,14 @@ fn text_spans(
     style: Style,
     kind: LineKind,
 ) -> Vec<Span<'static>> {
-    if kind == LineKind::Context {
-        if let Some(tokens) = app.tokens.get(key).and_then(|lines| lines.get(index)) {
-            if !tokens.is_empty() {
+    if kind == LineKind::Context
+        && let Some(tokens) = app.tokens.get(key).and_then(|lines| lines.get(index))
+            && !tokens.is_empty() {
                 return tokens
                     .iter()
                     .map(|(chunk, color)| Span::styled(chunk.clone(), style.fg(*color)))
                     .collect();
             }
-        }
-    }
     vec![Span::styled(text.to_string(), style)]
 }
 

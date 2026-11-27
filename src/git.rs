@@ -49,6 +49,83 @@ pub struct Snapshot {
     pub head: String,
 }
 
+pub fn install_tool_path() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").ok();
+    let next = augment_path(home.as_deref().map(Path::new), &current);
+    if next != current {
+        unsafe { std::env::set_var("PATH", next) };
+    }
+}
+
+fn augment_path(home: Option<&Path>, current: &str) -> String {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home {
+        let mut managers = versioned_bins(&home.join(".nvm/versions/node"), &["bin"]);
+        managers.extend(versioned_bins(
+            &home.join(".local/share/fnm/node-versions"),
+            &["installation", "bin"],
+        ));
+        if !managers.iter().any(|dir| contains_path(current, dir)) {
+            dirs.extend(managers);
+        }
+        for extra in [
+            "Library/pnpm",
+            ".local/share/pnpm",
+            ".bun/bin",
+            ".volta/bin",
+            ".yarn/bin",
+            ".npm-global/bin",
+        ] {
+            let dir = home.join(extra);
+            if dir.is_dir() {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs.retain(|dir| !contains_path(current, dir));
+    if dirs.is_empty() {
+        return current.to_string();
+    }
+    let extra = dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    format!("{}:{}", extra, current)
+}
+
+fn versioned_bins(root: &Path, tail: &[&str]) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(Vec<u32>, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let key = version_key(&entry.file_name().to_string_lossy());
+            let mut bin = entry.path();
+            for part in tail {
+                bin = bin.join(part);
+            }
+            bin.is_dir().then_some((key, bin))
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.reverse();
+    found.into_iter().map(|(_, bin)| bin).collect()
+}
+
+fn version_key(name: &str) -> Vec<u32> {
+    name.trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
+        .collect()
+}
+
+fn contains_path(current: &str, dir: &Path) -> bool {
+    current.split(':').any(|entry| Path::new(entry) == dir)
+}
+
 fn run(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -445,7 +522,7 @@ pub fn branch_state(repo: &Path, base: &str) -> BranchState {
 pub fn run_shell(repo: &Path, command: &str) -> Result<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let output = Command::new(shell)
-        .args(["-c", command])
+        .args(["-ic", command])
         .current_dir(repo)
         .output()?;
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -693,8 +770,9 @@ pub fn commit(repo: &Path, message: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        abort_op, checkout_side, conflict_count, continue_op, current_op, diff_text,
-        discard_file, run, snapshot, stage_patch, strip_ansi, worktree_line, Op, Section,
+        abort_op, augment_path, checkout_side, conflict_count, continue_op, current_op,
+        diff_text, discard_file, run, run_shell, snapshot, stage_patch, strip_ansi,
+        worktree_line, Op, Section,
     };
     use std::path::Path;
     use std::process::Command;
@@ -807,6 +885,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    #[test]
+    fn run_shell_runs_interactively() {
+        let dir = std::env::temp_dir().join(format!("dn-shell-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = run_shell(&dir, "case $- in *i*) echo interactive;; esac");
+        assert!(out.unwrap().contains("interactive"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn augment_path_prepends_new_tool_dirs_in_order() {
+        let root = std::env::temp_dir().join(format!("dn-path-a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in [
+            ".nvm/versions/node/v18.19.0/bin",
+            ".nvm/versions/node/v22.14.0/bin",
+            ".bun/bin",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let out = augment_path(Some(&root), "/usr/bin");
+        let expect = format!(
+            "{}:{}:{}:/usr/bin",
+            root.join(".nvm/versions/node/v22.14.0/bin").display(),
+            root.join(".nvm/versions/node/v18.19.0/bin").display(),
+            root.join(".bun/bin").display(),
+        );
+        assert_eq!(out, expect);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn augment_path_keeps_active_node_version() {
+        let root = std::env::temp_dir().join(format!("dn-path-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in [
+            ".nvm/versions/node/v18.19.0/bin",
+            ".nvm/versions/node/v22.14.0/bin",
+            ".bun/bin",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let active = root.join(".nvm/versions/node/v18.19.0/bin");
+        let current = format!("{}:/usr/bin", active.display());
+        let out = augment_path(Some(&root), &current);
+        assert!(!out.contains("v22.14.0"));
+        assert!(out.starts_with(&root.join(".bun/bin").display().to_string()));
+        assert!(out.ends_with(&current));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn scratch_conflict(tag: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("dn-cf-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
@@ -888,7 +1017,11 @@ mod tests {
             std::fs::read_to_string(repo.join("f.txt")).unwrap(),
             "one\nMAIN\nthree\n"
         );
-        checkout_side(&repo, "f.txt", false).is_err();
+        let _ = checkout_side(&repo, "f.txt", false);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "one\nMAIN\nthree\n"
+        );
         let _ = std::fs::remove_dir_all(&repo);
 
         let repo = scratch_conflict("theirs");

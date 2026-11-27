@@ -104,7 +104,7 @@ cline = 'cline "Please address the review comments in {file}"'
 | `editor_command` | Overridden by `$DIFFNOTE_NVIM`, then `$VISUAL`, then `$EDITOR` |
 | `split`, `show_comments` | Default pane visibility; toggled with `v` and `b` |
 | `base_branch` | Branch to compare against; header shows ahead/behind and "up to date"; `p` changes it for the session from a list of local branches |
-| `rename_branch`, `push` | Key bindings for `C` (rename current branch) and `P` (`git push -u origin HEAD`), both confirmed before running |
+| `rename_branch`, `push` | Key bindings for `gn` (rename current branch) and `gp` (`git push -u origin HEAD`), both confirmed before running |
 | `update_command`, `branchup_command` | Shell commands run with `gs` / `gb`; `{base}` and `{branch}` expand before running |
 
 All git command keys start with `g` (like `gc` for commit). Press `g` to open the menu, then the second key. `gB` opens a list of local branches to pick the base for this session; the header and `gs`/`gb` update immediately. `gn` prompts for a new name and renames the current local branch. `gl` runs `git pull`, `gp` runs `git push -u origin HEAD`, and `gP` runs `git push -u origin HEAD --force-with-lease`. All of them ask for confirmation first. `gP` uses a red warning because it can rewrite remote history. Every git command shows a loading overlay while it runs, then the command output. `gp` and `gP` refuse to run on a detached HEAD.

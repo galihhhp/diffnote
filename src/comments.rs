@@ -104,27 +104,40 @@ impl CommentStore {
             .collect()
     }
 
-    pub fn payload(&self, repo: &Path) -> String {
-        let mut out = format!("diffnote review\nrepo: {}\n\n", repo.display());
-        for comment in self.unsent() {
-            out.push_str(&format!(
-                "{}:{}-{} — {}\n",
-                comment.path,
-                comment.label(),
-                comment.side.tag(),
-                comment.text
-            ));
-            for line in &comment.code {
-                out.push_str(&format!("    | {}\n", line));
-            }
+    pub fn payload(&self) -> String {
+        let unsent = self.unsent();
+        self.payload_from(&unsent)
+    }
+
+    pub fn payload_all(&self) -> String {
+        let all: Vec<&Comment> = self.items.iter().collect();
+        self.payload_from(&all)
+    }
+
+    fn payload_from(&self, comments: &[&Comment]) -> String {
+        let mut blocks = vec!["Code review comments from my editor:".to_string()];
+        for (index, comment) in comments.iter().enumerate() {
+            let mut block = format!("{}. {}:{}", index + 1, comment.path, comment.label());
             if comment.code.is_empty() && !comment.line_text.is_empty() {
-                out.push_str(&format!("    | {}\n", comment.line_text));
+                block.push_str(&format!("\n   │ {}", comment.line_text));
+            }
+            for line in &comment.code {
+                block.push_str(&format!("\n   │ {}", line));
+            }
+            let mut text = comment.text.lines();
+            if let Some(first) = text.next() {
+                block.push_str(&format!("\n   │ Comment: {}", first));
+            }
+            for line in text {
+                block.push_str(&format!("\n   │ {}", line));
             }
             if comment.orphan {
-                out.push_str("    | (line moved or removed)\n");
+                block.push_str("\n   │ (line moved or removed)");
             }
+            blocks.push(block);
         }
-        out
+        blocks.push("Make the requested changes and answer any questions. Reply per item.".to_string());
+        format!("{}\n", blocks.join("\n\n"))
     }
 
     pub fn reanchor(
@@ -230,9 +243,21 @@ mod tests {
     fn range_comment_payload_includes_range_and_code() {
         let mut store = CommentStore::default();
         store.add(draft(), "rename this".to_string());
-        let payload = store.payload(Path::new("/tmp/repo"));
-        assert!(payload.contains("a.rs:4-6-right"));
-        assert!(payload.contains("| let y = 2;"));
+        let payload = store.payload();
+        assert!(payload.starts_with("Code review comments from my editor:"));
+        assert!(payload.contains("1. a.rs:4-6"));
+        assert!(payload.contains("│ let y = 2;"));
+        assert!(payload.contains("│ Comment: rename this"));
+        assert!(payload.ends_with("Make the requested changes and answer any questions. Reply per item.\n"));
+    }
+
+    #[test]
+    fn payload_all_includes_sent_comments() {
+        let mut store = CommentStore::default();
+        store.add(draft(), "note".to_string());
+        store.mark_sent();
+        assert!(!store.payload().contains("note"));
+        assert!(store.payload_all().contains("note"));
     }
 
     #[test]

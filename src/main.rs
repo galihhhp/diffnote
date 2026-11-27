@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn main() -> Result<()> {
+    git::install_tool_path();
     let mut repo = PathBuf::from(
         std::env::var("DIFFNOTE_REPO").unwrap_or_else(|_| ".".to_string()),
     );

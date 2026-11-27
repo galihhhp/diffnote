@@ -807,14 +807,13 @@ impl App {
             self.update_search();
             return;
         }
-        if let KeyCode::Char(character) = key.code {
-            if !key.modifiers.contains(KeyModifiers::CONTROL)
+        if let KeyCode::Char(character) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT)
             {
                 self.search_query.push(character);
                 self.update_search();
             }
-        }
     }
 
     fn focus_comments(&mut self) {
@@ -950,13 +949,12 @@ impl App {
             self.status = format!("Rename {} to {}?", self.branch_state.current, name);
             return;
         }
-        if let KeyCode::Char(character) = key.code {
-            if !key.modifiers.contains(KeyModifiers::CONTROL)
+        if let KeyCode::Char(character) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT)
             {
                 self.rename_input.push(character);
             }
-        }
     }
 
     fn reject_detached(&mut self) -> bool {
@@ -1031,13 +1029,12 @@ impl App {
             self.run_command("branchup", &command);
             return;
         }
-        if let KeyCode::Char(character) = key.code {
-            if !key.modifiers.contains(KeyModifiers::CONTROL)
+        if let KeyCode::Char(character) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT)
             {
                 self.branch_input.push(character);
             }
-        }
     }
 
     fn run_update(&mut self) {
@@ -1238,7 +1235,7 @@ impl App {
     }
 
     fn deliver(&mut self, target: &Target) {
-        let payload = self.comments.payload(&self.repo);
+        let payload = self.comments.payload();
         match transport::send(
             target,
             &payload,
@@ -1260,7 +1257,7 @@ impl App {
             self.status = "no unsent comments".to_string();
             return;
         }
-        let payload = self.comments.payload(&self.repo);
+        let payload = self.comments.payload();
         match transport::send(
             &Target::NewTab,
             &payload,
@@ -1278,7 +1275,11 @@ impl App {
     }
 
     fn copy_payload(&mut self) {
-        let payload = self.comments.payload(&self.repo);
+        let payload = if self.comments.unsent().is_empty() {
+            self.comments.payload_all()
+        } else {
+            self.comments.payload()
+        };
         match transport::send(
             &Target::Clipboard,
             &payload,
@@ -1422,16 +1423,35 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: String) {
-        if self.mode == Mode::FilePicker {
-            let clean = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
-            self.file_query.push_str(&clean);
-            self.file_pick = 0;
-            self.update_file_matches();
-            return;
-        }
-        if self.mode == Mode::CommentInput || self.mode == Mode::CommitInput {
-            let clean = text.replace("\r\n", "\n").replace('\r', "\n");
-            self.input.push_str(&clean);
+        match self.mode {
+            Mode::FilePicker => {
+                let clean = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
+                self.file_query.push_str(&clean);
+                self.file_pick = 0;
+                self.update_file_matches();
+            }
+            Mode::CommentInput | Mode::CommitInput => {
+                let clean = text.replace("\r\n", "\n").replace('\r', "\n");
+                self.input.push_str(&clean);
+            }
+            Mode::DiffSearch => {
+                let clean = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
+                self.search_query.push_str(&clean);
+                self.update_search();
+            }
+            Mode::BranchInput => {
+                let clean = text.replace(['\r', '\n'], "");
+                self.branch_input.push_str(&clean);
+            }
+            Mode::RenameInput => {
+                let clean = text.replace(['\r', '\n'], "");
+                self.rename_input.push_str(&clean);
+            }
+            Mode::StashTitle => {
+                let clean = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
+                self.input.push_str(&clean);
+            }
+            _ => {}
         }
     }
 
@@ -1494,15 +1514,14 @@ impl App {
             self.file_query.clear();
             return;
         }
-        if let KeyCode::Char(character) = key.code {
-            if !key.modifiers.contains(KeyModifiers::CONTROL)
+        if let KeyCode::Char(character) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT)
             {
                 self.file_query.push(character);
                 self.file_pick = 0;
                 self.update_file_matches();
             }
-        }
     }
 
     fn is_newline_key(key: KeyEvent) -> bool {
@@ -1541,12 +1560,11 @@ impl App {
             self.input.pop();
             return;
         }
-        if let KeyCode::Char(character) = key.code {
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(character) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL) {
                 self.input.push(character);
                 return;
             }
-        }
         if pressed != "Enter" && pressed != self.config.key("confirm") {
             return;
         }
@@ -1561,13 +1579,12 @@ impl App {
                 self.input.clear();
                 return;
             }
-            if let Some(draft) = self.pending_comment.take() {
-                if !self.input.trim().is_empty() {
+            if let Some(draft) = self.pending_comment.take()
+                && !self.input.trim().is_empty() {
                     self.comments.add(draft, self.input.trim().to_string());
                     let _ = self.comments.save(&self.repo);
                     self.status = "comment added".to_string();
                 }
-            }
             self.mode = Mode::Normal;
             self.input.clear();
             return;
@@ -1680,11 +1697,10 @@ impl App {
                 .get(index)
                 .is_some_and(|line| !matches!(line.kind, LineKind::Header | LineKind::Hunk))
         };
-        if !content(self.cursor) {
-            if let Some(index) = (self.cursor..doc.lines.len()).find(|index| content(*index)) {
+        if !content(self.cursor)
+            && let Some(index) = (self.cursor..doc.lines.len()).find(|index| content(*index)) {
                 self.cursor = index;
             }
-        }
         self.visual_anchor = Some(self.cursor);
         self.mode = Mode::Visual;
         self.selection_status();
